@@ -1,6 +1,12 @@
 import einops
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
+from torch.distributions import normal, laplace, cauchy
+from typing import Union
+from torchtyping import TensorType
 
 
 #NOTE: This class was taken from the repo in our paper
