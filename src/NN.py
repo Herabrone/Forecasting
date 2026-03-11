@@ -200,3 +200,21 @@ def ensemble_nll_loss(ensemble_preds: Tensor, targets: Tensor) -> Tensor:
     
 
     """
+    # Remove the last dimension -> (batch_size, number_generations)
+    preds = ensemble_preds.squeeze(-1)
+
+    # Compute ensemble statistics
+    mean = preds.mean(dim=1)                  # (batch_size,)
+    var = preds.var(dim=1, unbiased=False)    # (batch_size,)
+
+    # Prevent numerical instability
+    var = var + 1e-6
+
+    # Align target shape
+    targets = targets.squeeze(-1)             # (batch_size,)
+
+    # Gaussian negative log likelihood
+    nll = 0.5 * torch.log(2 * torch.pi * var) + ((targets - mean) ** 2) / (2 * var)
+
+    # Return average loss across batch
+    return nll.mean()
