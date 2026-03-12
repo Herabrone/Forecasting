@@ -44,8 +44,7 @@ def score_rule_loss(ensemble_preds, targets, score_fn):
     preds = ensemble_preds.squeeze(-1)
     targets = targets.squeeze(-1)
 
-    batch_losses = [score_fn(preds[i], targets[i]) for i in range(preds.size(0))]
-    return torch.stack(batch_losses).mean()
+    return score_fn(preds, targets)
 
 
 def compute_loss(ensemble_preds, targets, loss_name):

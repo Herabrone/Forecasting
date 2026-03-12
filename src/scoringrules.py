@@ -10,37 +10,66 @@ ALPHA_KERNEL = 1.0 # Weight for energy-kernel
 # Implementation of C.1.1
 # P is the distribution, y is the goal value
 def energy(P, y):
-    m = P.shape[0]
+    single_input = (P.dim() == 1)
+    if single_input:
+        P = P.unsqueeze(0)
 
-    term1 = (2 / m) * torch.sum(torch.abs(P - y) ** BETA)
+    if y.dim() == 0:
+        y = y.unsqueeze(0)
+    if y.dim() == 1:
+        y = y.unsqueeze(1)
 
-    differences = torch.abs(P.unsqueeze(0) - P.unsqueeze(1)) ** BETA # Absolute differences
+    m = P.shape[1]
+
+    term1 = (2 / m) * torch.sum(torch.abs(P - y) ** BETA, dim=1)
+
+    differences = torch.abs(P.unsqueeze(1) - P.unsqueeze(2)) ** BETA # Absolute differences
 
     # Term 2 of the formula sums all the differences, except when j = k. So the diagonal should not be counted
-    # Create a mask for the differences where when j = k, set to false
-    boolean_mask = ~torch.eye(m, dtype = torch.bool)
+    diagonal_sum = torch.diagonal(differences, dim1=1, dim2=2).sum(dim=1)
+    off_diagonal_sum = differences.sum(dim=(1, 2)) - diagonal_sum
 
-    term2 = (1 / (m * (m - 1))) * (differences[boolean_mask].sum())
+    term2 = (1 / (m * (m - 1))) * off_diagonal_sum
 
-    return term1 - term2
+    score = term1 - term2
+
+    if single_input:
+        return score.squeeze(0)
+
+    return score.mean()
 
 # Implementation of C.1.2
 # In B.2.2 the Gaussian Kernel k(x,y) is defined
 def kernel(P, y):
-    m = P.shape[0]
+    single_input = (P.dim() == 1)
+    if single_input:
+        P = P.unsqueeze(0)
 
-    k_term1 = torch.exp((-torch.abs(P.unsqueeze(0) - P.unsqueeze(1)) ** 2) / (2 * (GAMMA ** 2))) # Gaussian kernel
+    if y.dim() == 0:
+        y = y.unsqueeze(0)
+    if y.dim() == 1:
+        y = y.unsqueeze(1)
+
+    m = P.shape[1]
+
+    k_term1 = torch.exp((-torch.abs(P.unsqueeze(1) - P.unsqueeze(2)) ** 2) / (2 * (GAMMA ** 2))) # Gaussian kernel
 
     # Create a mask for the differences where when j = k, set to false
-    boolean_mask = ~torch.eye(m, dtype = torch.bool)
+    diagonal_sum = torch.diagonal(k_term1, dim1=1, dim2=2).sum(dim=1)
+    off_diagonal_sum = k_term1.sum(dim=(1, 2)) - diagonal_sum
 
-    term1 = (1 / (m * (m - 1))) * (k_term1[boolean_mask].sum())
+    term1 = (1 / (m * (m - 1))) * off_diagonal_sum
 
     k_term2 = torch.exp((-torch.abs(P - y) ** 2) / (2 * (GAMMA ** 2))) # Gaussian kernel
 
-    term2 = (2 / m) * torch.sum(k_term2)
+    term2 = (2 / m) * torch.sum(k_term2, dim=1)
 
-    return term1 - term2
+    score = term1 - term2
+
+    if single_input:
+        return score.squeeze(0)
+
+    return score.mean()
 
 # Weighted sum of energy and kernel, by lemma 4
 def energy_kernel(P, y):
