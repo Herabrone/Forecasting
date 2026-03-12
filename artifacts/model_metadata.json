@@ -1,0 +1,11 @@
+{
+  "checkpoint_path": "C:\\Users\\darja\\Documents\\MLForecasting\\Forecasting\\artifacts\\model_checkpoint.pt",
+  "loss_name": "ensemble_nll",
+  "device": "cpu",
+  "quick_run": true,
+  "max_products": 1000,
+  "max_day_columns": 365,
+  "batch_size": 1024,
+  "epochs": 3,
+  "final_epoch_loss": 9.837603676207637
+}
