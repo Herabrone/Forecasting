@@ -39,9 +39,13 @@ def create_train_loader(X, y, batch_size=64):
     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
-def train_model(X, y):
-    """Create NN model, create ConditionalGenerativeModel wrapper, initialize."""
+def train_model(train_loader):
+    """Create NN model and minimal training setup."""
+    device = torch.device('cpu')
+
     noise_size = 8 # Size of the noise vector for the generative model, can be chaned to see how it affects the results
+    learning_rate = 1e-3
+    epochs = 5
     
     net = createGenerativeGRUNN(
         data_size=1,
@@ -54,12 +58,15 @@ def train_model(X, y):
         net=net,
         size_auxiliary_variable=noise_size,
         number_generations_per_forward_call=20
-    )
-    
-    # Test forward pass, this should be where we do the training loop (I just want to ensure the model works first lol)
-    context_batch = X[:64]
-    ensemble_preds = model(context_batch)
-    print(f"Model initialized. Ensemble output shape: {ensemble_preds.shape}")
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    model.train()
+
+    print(f"Model ready on {device}. Batches per epoch: {len(train_loader)}")
+    print(f"Training setup - epochs: {epochs}, learning_rate: {learning_rate}")
+
+    return model, optimizer, device, epochs
 
 
 if __name__ == '__main__':
@@ -67,4 +74,4 @@ if __name__ == '__main__':
     train_loader = create_train_loader(X, y)
     print(f"Data shapes - X: {X.shape}, y: {y.shape}")
     print(f"Training batches: {len(train_loader)}")
-    train_model(X, y)
+    train_model(train_loader)
