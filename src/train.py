@@ -1,21 +1,24 @@
 import sys
 import os
+from pathlib import Path
 import pandas as pd
-import numpy as np
 import torch
-import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datapreprocessing import process, sliding_window, WINDOW_SIZE
-from src.NN import createGenerativeGRUNN, ConditionalGenerativeModel
+from datapreprocessing import process
+from src.NN import createGenerativeGRUNN, ConditionalGenerativeModel, ensemble_nll_loss
+
+
+DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
 
 
 def load_and_preprocess():
     """Load data from CSV, call process() from datapreprocessing, return X, y tensors ready for NN."""
     
     #This is just pulled from the datapreprocessing, ill clean this up later 
-    dataset = pd.read_csv('./sales_train_validation.csv')
+    dataset = pd.read_csv(DATA_PATH)
     
     metadata_cols = ['id', 'item_id', 'dept_id', 'cat_id', 'store_id', 'state_id']
     days_cols = [col for col in dataset.columns if col not in metadata_cols]
@@ -27,6 +30,13 @@ def load_and_preprocess():
     y_tensor = torch.from_numpy(y).float()
     
     return X_tensor, y_tensor
+
+
+def create_train_loader(X, y, batch_size=64):
+    """Wrap the full training tensors in a shuffled DataLoader."""
+
+    dataset = TensorDataset(X, y)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
 def train_model(X, y):
@@ -54,5 +64,7 @@ def train_model(X, y):
 
 if __name__ == '__main__':
     X, y = load_and_preprocess()
+    train_loader = create_train_loader(X, y)
     print(f"Data shapes - X: {X.shape}, y: {y.shape}")
+    print(f"Training batches: {len(train_loader)}")
     train_model(X, y)
