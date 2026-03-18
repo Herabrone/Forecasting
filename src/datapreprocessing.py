@@ -49,7 +49,15 @@ def normalize_windows_and_targets(windows, targets):
     return normalized_windows.astype(np.float32), normalized_targets.astype(np.float32)
 
 # Process data: get the timer series, convert to floats, build sliding windows for NN input
-def process(days):
+def process(days, calendar_features=None):
+    """Build model-ready windows from sales history.
+    """
+
+    if calendar_features is not None:
+        raise NotImplementedError(
+            "calendar_features support is not implemented yet. "
+            "Set USE_CALENDAR_FEATURES=False while until this is implemented."
+        )
 
     # Convert to continuous
     days_continuous = days.astype(np.float32).to_numpy()  # [num_products, num_days]

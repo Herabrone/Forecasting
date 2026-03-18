@@ -15,6 +15,9 @@ from src.scoringrules import energy, kernel, energy_kernel
 
 
 DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
+CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
+USE_CALENDAR_FEATURES = False  # Scaffold only. Keep False until calendar preprocessing is implemented.
+CALENDAR_FEATURE_SET = 'rich'  # Placeholder for future calendar feature sets. Ignored until calendar preprocessing is implemented.
 LOSS_NAME = 'ensemble_nll'  # Training objective to optimize. 'ensemble_nll' is usually the fastest and most stable.
                              # Other options ('energy', 'kernel', 'energy_kernel') are valid but can train slower.
 
@@ -67,13 +70,13 @@ def compute_loss(ensemble_preds, targets, loss_name):
 
 def load_and_preprocess():
     """Load data from CSV, call process() from datapreprocessing, return X, y tensors ready for NN."""
-    
-    #This is just pulled from the datapreprocessing, ill clean this up later 
+
+    # This is just pulled from the datapreprocessing, ill clean this up later
     dataset = pd.read_csv(DATA_PATH)
 
     if QUICK_RUN:
         dataset = dataset.head(MAX_PRODUCTS)
-    
+
     metadata_cols = ['id', 'item_id', 'dept_id', 'cat_id', 'store_id', 'state_id']
     days_cols = [col for col in dataset.columns if col not in metadata_cols]
     days = dataset[days_cols]
@@ -81,12 +84,20 @@ def load_and_preprocess():
     if QUICK_RUN:
         days_to_keep = max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)
         days = days.iloc[:, -days_to_keep:]
-    
-    X, y = process(days)
-    
+
+    calendar_features = None
+    if USE_CALENDAR_FEATURES:
+        if not CALENDAR_PATH.exists():
+            raise FileNotFoundError(f'Calendar file not found: {CALENDAR_PATH}')
+        raise NotImplementedError(
+            'USE_CALENDAR_FEATURES is enabled, but calendar feature preprocessing is '
+        )
+
+    X, y = process(days, calendar_features=calendar_features)
+
     X_tensor = torch.from_numpy(X).float()
     y_tensor = torch.from_numpy(y).float()
-    
+
     return X_tensor, y_tensor
 
 
@@ -133,7 +144,7 @@ def save_artifacts(model, device, loss_name, final_loss):
         json.dump(metadata, file_handle, indent=2)
 
 
-def train_model(train_loader, loss_name=LOSS_NAME):
+def train_model(train_loader, data_size, loss_name=LOSS_NAME):
     """Create NN model and minimal training setup."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
@@ -146,7 +157,7 @@ def train_model(train_loader, loss_name=LOSS_NAME):
     epochs = EPOCHS
     
     net = createGenerativeGRUNN(
-        data_size=1,
+        data_size=data_size,
         gru_hidden_size=64,
         noise_size=noise_size,
         output_size=1,
@@ -167,7 +178,7 @@ def train_model(train_loader, loss_name=LOSS_NAME):
     training_start_time = time.time()
 
     print(f"Model ready on {device}. Batches per epoch: {batches_per_epoch}")
-    print(f"Training setup - epochs: {epochs}, learning_rate: {learning_rate}, loss: {loss_name}")
+    print(f"Training setup - epochs: {epochs}, learning_rate: {learning_rate}, loss: {loss_name}, data_size: {data_size}")
 
     average_epoch_loss = None
 
@@ -211,10 +222,16 @@ def train_model(train_loader, loss_name=LOSS_NAME):
 
 
 if __name__ == '__main__':
+    print(f'Calendar features enabled: {USE_CALENDAR_FEATURES}')
+    print(f'Calendar path: {CALENDAR_PATH}')
+    print('Expected model input features: 1 (sales only)')
+    if USE_CALENDAR_FEATURES:
+        print(f'Calendar feature set selected: {CALENDAR_FEATURE_SET}')
+
     X, y = load_and_preprocess()
     train_loader = create_train_loader(X, y, batch_size=BATCH_SIZE)
     print(f"Data shapes - X: {X.shape}, y: {y.shape}")
     print(f"Training batches: {len(train_loader)}")
     if QUICK_RUN:
         print(f"Quick run enabled - products: {MAX_PRODUCTS}, day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, batch_size: {BATCH_SIZE}, epochs: {EPOCHS}")
-    train_model(train_loader, loss_name=LOSS_NAME)
+    train_model(train_loader, data_size=X.shape[-1], loss_name=LOSS_NAME)
