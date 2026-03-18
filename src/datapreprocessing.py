@@ -26,6 +26,120 @@ WINDOW_SIZE = 28
 NORMALIZATION_EPSILON = 1e-8
 
 
+def _parse_day_number(day_label):
+    """Extract integer day index from labels like d_1, d_1913."""
+
+    if not isinstance(day_label, str) or not day_label.startswith('d_'):
+        raise ValueError(f"Invalid day label: {day_label}")
+    try:
+        return int(day_label.split('_', maxsplit=1)[1])
+    except (IndexError, ValueError) as error:
+        raise ValueError(f"Invalid day label: {day_label}") from error
+
+
+def _build_minimal_calendar_features(aligned_calendar):
+    """Create compact calendar features from date columns."""
+
+    features = []
+    names = []
+
+    if 'date' in aligned_calendar.columns:
+        date_series = pd.to_datetime(aligned_calendar['date'], errors='coerce')
+        if date_series.isna().any():
+            raise ValueError('calendar.csv contains invalid date values.')
+
+        day_of_week = date_series.dt.dayofweek.astype(np.float32).to_numpy()
+        month = date_series.dt.month.astype(np.float32).to_numpy()
+
+        features.extend(
+            [
+                np.sin(2.0 * np.pi * day_of_week / 7.0).astype(np.float32),
+                np.cos(2.0 * np.pi * day_of_week / 7.0).astype(np.float32),
+                np.sin(2.0 * np.pi * month / 12.0).astype(np.float32),
+                np.cos(2.0 * np.pi * month / 12.0).astype(np.float32),
+                (day_of_week >= 5).astype(np.float32),
+            ]
+        )
+        names.extend(['dow_sin', 'dow_cos', 'month_sin', 'month_cos', 'is_weekend'])
+        return features, names
+
+    if 'wday' in aligned_calendar.columns:
+        wday = aligned_calendar['wday'].astype(np.float32).to_numpy() - 1.0
+        features.extend(
+            [
+                np.sin(2.0 * np.pi * wday / 7.0).astype(np.float32),
+                np.cos(2.0 * np.pi * wday / 7.0).astype(np.float32),
+                (wday >= 5).astype(np.float32),
+            ]
+        )
+        names.extend(['dow_sin', 'dow_cos', 'is_weekend'])
+        return features, names
+
+    raise ValueError("calendar.csv must include 'date' or 'wday' for date-derived features.")
+
+
+def build_calendar_features(calendar_df, day_cols, feature_set='rich'):
+    """Align calendar rows to selected sales days and build numeric feature matrix."""
+
+    if not day_cols:
+        raise ValueError('day_cols is empty; cannot align calendar features.')
+
+    aligned_calendar = calendar_df.copy()
+    if 'd' not in aligned_calendar.columns:
+        raise ValueError("calendar.csv must include a 'd' column (for example: d_1, d_2).")
+
+    aligned_calendar['d'] = aligned_calendar['d'].astype(str)
+    calendar_by_day = aligned_calendar.set_index('d', drop=False)
+
+    missing_days = [day for day in day_cols if day not in calendar_by_day.index]
+    if missing_days:
+        preview = ', '.join(missing_days[:5])
+        raise ValueError(f'calendar.csv is missing required day labels: {preview}')
+
+    aligned_calendar = calendar_by_day.loc[day_cols].copy()
+
+    day_numbers = np.array([_parse_day_number(day) for day in day_cols], dtype=np.float32)
+    feature_values = [day_numbers]
+    feature_names = ['day_index']
+
+    minimal_values, minimal_names = _build_minimal_calendar_features(aligned_calendar)
+    feature_values.extend(minimal_values)
+    feature_names.extend(minimal_names)
+
+    if feature_set == 'rich':
+        for snap_col in ('snap_CA', 'snap_TX', 'snap_WI'):
+            if snap_col in aligned_calendar.columns:
+                feature_values.append(aligned_calendar[snap_col].fillna(0).astype(np.float32).to_numpy())
+                feature_names.append(snap_col)
+
+        event_cols = ['event_name_1', 'event_type_1', 'event_name_2', 'event_type_2']
+        for event_col in event_cols:
+            if event_col not in aligned_calendar.columns:
+                continue
+            encoded = pd.get_dummies(
+                aligned_calendar[event_col].fillna('none').astype(str),
+                prefix=event_col,
+                dtype=np.float32,
+            )
+            if encoded.shape[1] == 0:
+                continue
+            feature_values.extend([encoded[column].to_numpy(dtype=np.float32) for column in encoded.columns])
+            feature_names.extend(encoded.columns.tolist())
+    elif feature_set != 'minimal':
+        raise ValueError(f"Unsupported calendar feature_set: {feature_set}. Use 'minimal' or 'rich'.")
+
+    feature_matrix = np.column_stack(feature_values).astype(np.float32)
+    return feature_matrix, feature_names
+
+
+def load_calendar_features(calendar_path, day_cols, feature_set='rich'):
+    """Load calendar CSV from disk and return aligned feature matrix."""
+
+    calendar_df = pd.read_csv(calendar_path)
+    feature_matrix, feature_names = build_calendar_features(calendar_df, day_cols, feature_set=feature_set)
+    return feature_matrix, feature_names
+
+
 def normalize_context_window(values):
     """Normalize a single context window using only its own history."""
 
@@ -50,17 +164,20 @@ def normalize_windows_and_targets(windows, targets):
 
 # Process data: get the timer series, convert to floats, build sliding windows for NN input
 def process(days, calendar_features=None):
-    """Build model-ready windows from sales history.
-    """
-
-    if calendar_features is not None:
-        raise NotImplementedError(
-            "calendar_features support is not implemented yet. "
-            "Set USE_CALENDAR_FEATURES=False while until this is implemented."
-        )
+    """Build model-ready windows from sales history."""
 
     # Convert to continuous
     days_continuous = days.astype(np.float32).to_numpy()  # [num_products, num_days]
+
+    if calendar_features is not None:
+        calendar_features = np.asarray(calendar_features, dtype=np.float32)
+        if calendar_features.ndim != 2:
+            raise ValueError('calendar_features must be a 2D array shaped [num_days, num_features].')
+        if calendar_features.shape[0] != days_continuous.shape[1]:
+            raise ValueError(
+                f'calendar_features day count ({calendar_features.shape[0]}) does not match '
+                f'sales day count ({days_continuous.shape[1]}).'
+            )
 
     # Build sliding windows
     windows, targets = sliding_window(days_continuous)    # windows: [num_windows, num_products, WINDOW_SIZE]

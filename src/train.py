@@ -9,15 +9,15 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datapreprocessing import process, WINDOW_SIZE
+from datapreprocessing import process, WINDOW_SIZE, load_calendar_features
 from src.NN import createGenerativeGRUNN, ConditionalGenerativeModel, ensemble_nll_loss
 from src.scoringrules import energy, kernel, energy_kernel
 
 
 DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
 CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
-USE_CALENDAR_FEATURES = False  # Scaffold only. Keep False until calendar preprocessing is implemented.
-CALENDAR_FEATURE_SET = 'rich'  # Placeholder for future calendar feature sets. Ignored until calendar preprocessing is implemented.
+USE_CALENDAR_FEATURES = False  # Toggle calendar covariates on/off.
+CALENDAR_FEATURE_SET = 'rich'  # Supported values: 'minimal' or 'rich'.
 LOSS_NAME = 'ensemble_nll'  # Training objective to optimize. 'ensemble_nll' is usually the fastest and most stable.
                              # Other options ('energy', 'kernel', 'energy_kernel') are valid but can train slower.
 
@@ -85,13 +85,23 @@ def load_and_preprocess():
         days_to_keep = max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)
         days = days.iloc[:, -days_to_keep:]
 
+    selected_day_cols = days.columns.tolist()
+
     calendar_features = None
     if USE_CALENDAR_FEATURES:
         if not CALENDAR_PATH.exists():
             raise FileNotFoundError(f'Calendar file not found: {CALENDAR_PATH}')
-        raise NotImplementedError(
-            'USE_CALENDAR_FEATURES is enabled, but calendar feature preprocessing is '
+        calendar_features, calendar_feature_names = load_calendar_features(
+            CALENDAR_PATH,
+            selected_day_cols,
+            feature_set=CALENDAR_FEATURE_SET,
         )
+        print(
+            f"Loaded calendar covariates: {calendar_features.shape[1]} features "
+            f"for {calendar_features.shape[0]} days"
+        )
+        print(f"Calendar feature set: {CALENDAR_FEATURE_SET}")
+        print(f"Sample calendar columns: {calendar_feature_names[:5]}")
 
     X, y = process(days, calendar_features=calendar_features)
 
