@@ -2,8 +2,7 @@
 
 This script evaluates a trained model by repeatedly forecasting the next day
 from a moving context window (rolling forecast origins). It reports MAE, RMSE,
-and R2, prints a concise console summary table, and saves PNG plots for quick
-visual inspection of model performance quality.
+and R2 with a concise CLI summary.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import pandas as pd
 import torch
 
 from NN import ConditionalGenerativeModel, createGenerativeGRUNN
-from datapreprocessing import WINDOW_SIZE
+from datapreprocessing import NORMALIZATION_EPSILON, WINDOW_SIZE
 from train import (
 	DATA_PATH,
 	MAX_DAY_COLUMNS,
@@ -30,7 +29,7 @@ METADATA_COLS = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Run rolling backtest and report MAE/RMSE/R2 with plots."
+		description="Run rolling backtest and report MAE/RMSE/R2 in the CLI."
 	)
 	parser.add_argument(
 		"--mode",
@@ -59,14 +58,16 @@ def parse_args() -> argparse.Namespace:
 	return parser.parse_args()
 
 
-def load_model(checkpoint_path: Path = MODEL_FILE, device: str = "cpu") -> ConditionalGenerativeModel:
+def load_model(checkpoint_path=MODEL_FILE, device: str = "cpu") -> ConditionalGenerativeModel:
 	checkpoint = torch.load(checkpoint_path, map_location=device)
+	fc_hidden_sizes = checkpoint.get("fc_hidden_sizes")
 
 	net = createGenerativeGRUNN(
 		data_size=1,
 		gru_hidden_size=checkpoint["gru_hidden_size"],
 		noise_size=checkpoint["noise_size"],
 		output_size=checkpoint["output_size"],
+		hidden_sizes=fc_hidden_sizes,
 	)()
 
 	model = ConditionalGenerativeModel(
@@ -105,7 +106,7 @@ def compute_metrics(y_true: torch.Tensor, y_pred: torch.Tensor) -> Dict[str, flo
 	sse = (residuals.pow(2)).sum().item()
 	r2 = float("nan") if sst == 0 else 1.0 - (sse / sst)
 
-	return {"mae": mae, "rmse": rmse, "r2": r2}
+	return {"mae": mae, "rmse": rmse, "r2": r2, "sse": sse, "sst": sst}
 
 
 def model_predict_mean(
@@ -116,6 +117,20 @@ def model_predict_mean(
 	with torch.no_grad():
 		ensemble_preds = model(context_batch.to(device, non_blocking=True))
 	return ensemble_preds.squeeze(-1).mean(dim=1).to("cpu")
+
+
+def normalize_context_batch(context_batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+	"""Normalize each product context using only its own history."""
+
+	context_mean = context_batch.mean(dim=1, keepdim=True)
+	context_std = context_batch.std(dim=1, keepdim=True, unbiased=False)
+	safe_std = torch.where(
+		context_std > NORMALIZATION_EPSILON,
+		context_std,
+		torch.ones_like(context_std),
+	)
+	normalized_context = (context_batch - context_mean) / safe_std
+	return normalized_context, context_mean.squeeze(1), safe_std.squeeze(1)
 
 
 def run_rolling_backtest(
@@ -151,8 +166,10 @@ def run_rolling_backtest(
 		pred_chunks = []
 		for start in range(0, num_products, batch_size):
 			end = min(start + batch_size, num_products)
-			context = series[start:end, origin - WINDOW_SIZE:origin].unsqueeze(-1)
-			pred_chunks.append(model_predict_mean(model, context, device))
+			raw_context = series[start:end, origin - WINDOW_SIZE:origin]
+			normalized_context, context_mean, context_std = normalize_context_batch(raw_context)
+			pred_mean = model_predict_mean(model, normalized_context.unsqueeze(-1), device)
+			pred_chunks.append(pred_mean * context_std + context_mean)
 
 		pred_values = torch.cat(pred_chunks, dim=0)
 		metrics = compute_metrics(true_values, pred_values)
@@ -164,6 +181,8 @@ def run_rolling_backtest(
 				"mae": metrics["mae"],
 				"rmse": metrics["rmse"],
 				"r2": metrics["r2"],
+				"sse": metrics["sse"],
+				"sst": metrics["sst"],
 			}
 		)
 		all_true_batches.append(true_values)
@@ -194,7 +213,22 @@ def print_summary(overall: Dict[str, float], per_origin: pd.DataFrame, mode: str
 	print("Per-origin metric means")
 	print(f"MAE mean:  {per_origin['mae'].mean():.4f}")
 	print(f"RMSE mean: {per_origin['rmse'].mean():.4f}")
-	print(f"R2 mean:   {per_origin['r2'].mean():.4f}")
+
+	valid_r2 = per_origin["r2"].replace([float("inf"), float("-inf")], float("nan")).dropna()
+	if len(valid_r2) > 0:
+		print(f"R2 mean (raw):      {valid_r2.mean():.4f}")
+		print(f"R2 median (robust): {valid_r2.median():.4f}")
+	else:
+		print("R2 mean/median: unavailable (no valid per-origin R2 values)")
+
+	sst_total = per_origin["sst"].sum()
+	if sst_total > 0:
+		weighted_r2 = 1.0 - (per_origin["sse"].sum() / sst_total)
+		print(f"R2 SST-weighted:    {weighted_r2:.4f}")
+
+	low_variance_origins = int((per_origin["sst"] < 1e-6).sum())
+	if low_variance_origins > 0:
+		print(f"Low-variance origins (sst < 1e-6): {low_variance_origins}")
 
 
 def main() -> None:

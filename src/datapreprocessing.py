@@ -22,7 +22,31 @@
 import pandas as pd
 import numpy as np
 
-WINDOW_SIZE = 10
+WINDOW_SIZE = 28
+NORMALIZATION_EPSILON = 1e-8
+
+
+def normalize_context_window(values):
+    """Normalize a single context window using only its own history."""
+
+    values = np.asarray(values, dtype=np.float32)
+    mean = float(values.mean())
+    std = float(values.std())
+    safe_std = std if std > NORMALIZATION_EPSILON else 1.0
+    normalized_values = (values - mean) / safe_std
+    return normalized_values.astype(np.float32), mean, safe_std
+
+
+def normalize_windows_and_targets(windows, targets):
+    """Normalize each training sample from its context window to avoid future leakage."""
+
+    context_mean = windows.mean(axis=2, keepdims=True)
+    context_std = windows.std(axis=2, keepdims=True)
+    safe_std = np.where(context_std > NORMALIZATION_EPSILON, context_std, 1.0)
+
+    normalized_windows = (windows - context_mean) / safe_std
+    normalized_targets = (targets - context_mean.squeeze(-1)) / safe_std.squeeze(-1)
+    return normalized_windows.astype(np.float32), normalized_targets.astype(np.float32)
 
 # Process data: get the timer series, convert to floats, build sliding windows for NN input
 def process(days):
@@ -32,6 +56,7 @@ def process(days):
 
     # Build sliding windows
     windows, targets = sliding_window(days_continuous)    # windows: [num_windows, num_products, WINDOW_SIZE]
+    windows, targets = normalize_windows_and_targets(windows, targets)
 
     # Reshape to per-sample layout: each (product, window) pair becomes one sample
     X = np.transpose(windows, (1, 0, 2)).reshape(-1, WINDOW_SIZE, 1).astype(np.float32)  # [num_samples, WINDOW_SIZE, 1]

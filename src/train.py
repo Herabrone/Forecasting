@@ -28,8 +28,11 @@ BATCH_SIZE = 1024  # Samples per optimizer step.
                    # Larger batches usually increase throughput on GPU but require more VRAM.
                    # If you hit CUDA OOM, lower this first (for example: 512, then 256).
 
-EPOCHS = 3  # Full passes over the selected training subset.
+EPOCHS = 10  # Full passes over the selected training subset.
             # More epochs can improve fit but increase runtime linearly.
+
+# Explicit FC sizes prevent the default architecture from shrinking to a tiny last hidden layer.
+FC_HIDDEN_SIZES = [128, 64, 32]
 
 PROGRESS_EVERY = 50  # Print progress/ETA every N batches to show how close training is to completion.
 
@@ -110,6 +113,7 @@ def save_artifacts(model, device, loss_name, final_loss):
         'noise_size': 8,
         'gru_hidden_size': 64,
         'output_size': 1,
+        'fc_hidden_sizes': FC_HIDDEN_SIZES,
         'number_generations_per_forward_call': 20,
     }
     torch.save(checkpoint, MODEL_FILE)
@@ -145,7 +149,8 @@ def train_model(train_loader, loss_name=LOSS_NAME):
         data_size=1,
         gru_hidden_size=64,
         noise_size=noise_size,
-        output_size=1
+        output_size=1,
+        hidden_sizes=FC_HIDDEN_SIZES,
     )()
     
     model = ConditionalGenerativeModel(

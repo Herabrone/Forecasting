@@ -4,7 +4,7 @@ import pandas as pd
 import torch
 
 from NN import createGenerativeGRUNN, ConditionalGenerativeModel
-from datapreprocessing import WINDOW_SIZE
+from datapreprocessing import WINDOW_SIZE, normalize_context_window
 from train import DATA_PATH, MODEL_FILE, QUICK_RUN, MAX_DAY_COLUMNS
 
 TARGET_PRODUCT_ID = 'HOBBIES_1_008_CA_1_validation'
@@ -30,19 +30,22 @@ def load_product_latest_window(product_id):
 
     context_values = series[-(WINDOW_SIZE + 1):-1]
     actual_next = float(series[-1])
+    normalized_context, context_mean, context_std = normalize_context_window(context_values)
 
-    context_tensor = torch.tensor(context_values, dtype=torch.float32).view(1, WINDOW_SIZE, 1)
-    return context_tensor, actual_next
+    context_tensor = torch.tensor(normalized_context, dtype=torch.float32).view(1, WINDOW_SIZE, 1)
+    return context_tensor, actual_next, context_mean, context_std
 
 
 def load_model(checkpoint_path=MODEL_FILE, device='cpu'):
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    fc_hidden_sizes = checkpoint.get('fc_hidden_sizes')
 
     net = createGenerativeGRUNN(
         data_size=1,
         gru_hidden_size=checkpoint['gru_hidden_size'],
         noise_size=checkpoint['noise_size'],
-        output_size=checkpoint['output_size']
+        output_size=checkpoint['output_size'],
+        hidden_sizes=fc_hidden_sizes,
     )()
 
     model = ConditionalGenerativeModel(
@@ -60,13 +63,13 @@ def main():
     device = 'cpu'
     model = load_model(device=device)
 
-    context, target = load_product_latest_window(TARGET_PRODUCT_ID)
+    context, target, context_mean, context_std = load_product_latest_window(TARGET_PRODUCT_ID)
     context = context.to(device)
 
     with torch.no_grad():
         ensemble_preds = model(context)
 
-    preds = ensemble_preds.squeeze(0).squeeze(-1)
+    preds = ensemble_preds.squeeze(0).squeeze(-1) * context_std + context_mean
     pred_mean = preds.mean().item()
     rounded_forecast = max(0, round(pred_mean))
 
