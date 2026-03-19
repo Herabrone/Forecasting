@@ -23,6 +23,8 @@ from train import (
 	MAX_DAY_COLUMNS,
 	MAX_PRODUCTS,
 	MODEL_FILE,
+	TRAIN_SPLIT,
+	VAL_SPLIT,
 )
 
 
@@ -56,6 +58,17 @@ def parse_args() -> argparse.Namespace:
 		type=int,
 		default=None,
 		help="Optional cap on number of rolling origins (uses most recent origins).",
+	)
+	parser.add_argument(
+		"--eval-split",
+		choices=["all", "val", "test"],
+		default="test",
+		help=(
+			"Temporal split to evaluate. "
+			"'test' (default) uses the held-out last 20%%, "
+			"'val' uses the middle 20%%, "
+			"'all' evaluates every rolling origin."
+		),
 	)
 	return parser.parse_args()
 
@@ -176,6 +189,29 @@ def normalize_calendar_context(calendar_context: torch.Tensor) -> torch.Tensor:
 	return (calendar_context - feature_mean) / safe_std
 
 
+def _split_origin_range(
+	num_days: int,
+	horizon: int,
+	eval_split: str,
+) -> Tuple[int, int]:
+	"""Return (first_origin, last_origin) day indices for the requested split."""
+
+	total_windows = num_days - WINDOW_SIZE
+	train_end = int(math.floor(total_windows * TRAIN_SPLIT))
+	val_end = int(math.floor(total_windows * (TRAIN_SPLIT + VAL_SPLIT)))
+	train_end = max(1, min(train_end, total_windows - 2))
+	val_end = max(train_end + 1, min(val_end, total_windows - 1))
+
+	if eval_split == "val":
+		# Val windows: [train_end, val_end)  →  origins: train_end+WINDOW_SIZE .. val_end+WINDOW_SIZE-1
+		return WINDOW_SIZE + train_end, WINDOW_SIZE + val_end - 1
+	if eval_split == "test":
+		# Test windows: [val_end, total_windows)  →  origins: val_end+WINDOW_SIZE .. num_days-horizon
+		return WINDOW_SIZE + val_end, num_days - horizon
+	# "all"
+	return WINDOW_SIZE, num_days - horizon
+
+
 def run_rolling_backtest(
 	model: ConditionalGenerativeModel,
 	series: torch.Tensor,
@@ -184,17 +220,20 @@ def run_rolling_backtest(
 	device: str,
 	batch_size: int,
 	max_origins: int | None,
+	eval_split: str = "test",
 ) -> Tuple[Dict[str, float], pd.DataFrame, torch.Tensor, torch.Tensor]:
 	if horizon != 1:
 		raise ValueError("Only 1-day horizon is currently supported.")
 
 	num_products, num_days = series.shape
-	first_origin = WINDOW_SIZE
-	last_origin = num_days - horizon
+	first_origin, last_origin = _split_origin_range(num_days, horizon, eval_split)
 	origins = list(range(first_origin, last_origin + 1))
 
 	if not origins:
-		raise ValueError("Not enough day columns to build rolling windows.")
+		raise ValueError(
+			f"No rolling origins available for eval_split='{eval_split}'. "
+			"Check that the series has enough day columns for the requested split."
+		)
 
 	if max_origins is not None and max_origins > 0:
 		origins = origins[-max_origins:]
@@ -255,10 +294,11 @@ def run_rolling_backtest(
 	return overall_metrics, metrics_df, all_true, all_pred
 
 
-def print_summary(overall: Dict[str, float], per_origin: pd.DataFrame, mode: str, horizon: int) -> None:
+def print_summary(overall: Dict[str, float], per_origin: pd.DataFrame, mode: str, horizon: int, eval_split: str = "test") -> None:
 	print("\nBacktest summary")
 	print("-" * 72)
 	print(f"Mode: {mode}")
+	print(f"Eval split: {eval_split}")
 	print(f"Horizon: {horizon} day")
 	print(f"Origins evaluated: {len(per_origin)}")
 	print("-" * 72)
@@ -302,6 +342,8 @@ def main() -> None:
 	print(f"Day columns in evaluation: {series.shape[1]}")
 	print(f"Model input size: {model_data_size}")
 
+	print(f"Eval split: {args.eval_split}")
+
 	overall, per_origin, _all_true, _all_pred = run_rolling_backtest(
 		model=model,
 		series=series,
@@ -310,9 +352,10 @@ def main() -> None:
 		device=device,
 		batch_size=args.batch_size,
 		max_origins=args.max_origins,
+		eval_split=args.eval_split,
 	)
 
-	print_summary(overall=overall, per_origin=per_origin, mode=args.mode, horizon=args.horizon)
+	print_summary(overall=overall, per_origin=per_origin, mode=args.mode, horizon=args.horizon, eval_split=args.eval_split)
 
 
 if __name__ == "__main__":
