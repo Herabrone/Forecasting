@@ -39,9 +39,16 @@ def load_product_latest_window(product_id):
 def load_model(checkpoint_path=MODEL_FILE, device='cpu'):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     fc_hidden_sizes = checkpoint.get('fc_hidden_sizes')
+    data_size = checkpoint.get('data_size', 1)
+
+    if data_size != 1:
+        raise NotImplementedError(
+            'This predict script currently supports sales-only checkpoints (data_size=1). '
+            'Train with USE_CALENDAR_FEATURES=False or extend predict.py to build calendar-aware inputs.'
+        )
 
     net = createGenerativeGRUNN(
-        data_size=1,
+        data_size=data_size,
         gru_hidden_size=checkpoint['gru_hidden_size'],
         noise_size=checkpoint['noise_size'],
         output_size=checkpoint['output_size'],

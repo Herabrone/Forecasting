@@ -15,8 +15,10 @@ import pandas as pd
 import torch
 
 from NN import ConditionalGenerativeModel, createGenerativeGRUNN
-from datapreprocessing import NORMALIZATION_EPSILON, WINDOW_SIZE
+from datapreprocessing import NORMALIZATION_EPSILON, WINDOW_SIZE, load_calendar_features
 from train import (
+	CALENDAR_FEATURE_SET,
+	CALENDAR_PATH,
 	DATA_PATH,
 	MAX_DAY_COLUMNS,
 	MAX_PRODUCTS,
@@ -61,9 +63,10 @@ def parse_args() -> argparse.Namespace:
 def load_model(checkpoint_path=MODEL_FILE, device: str = "cpu") -> ConditionalGenerativeModel:
 	checkpoint = torch.load(checkpoint_path, map_location=device)
 	fc_hidden_sizes = checkpoint.get("fc_hidden_sizes")
+	data_size = checkpoint.get("data_size", 1)
 
 	net = createGenerativeGRUNN(
-		data_size=1,
+		data_size=data_size,
 		gru_hidden_size=checkpoint["gru_hidden_size"],
 		noise_size=checkpoint["noise_size"],
 		output_size=checkpoint["output_size"],
@@ -81,7 +84,7 @@ def load_model(checkpoint_path=MODEL_FILE, device: str = "cpu") -> ConditionalGe
 	return model
 
 
-def load_series_matrix(mode: str) -> Tuple[List[str], torch.Tensor]:
+def load_series_matrix(mode: str) -> Tuple[List[str], List[str], torch.Tensor]:
 	dataset = pd.read_csv(DATA_PATH)
 
 	if mode == "quick":
@@ -93,7 +96,34 @@ def load_series_matrix(mode: str) -> Tuple[List[str], torch.Tensor]:
 
 	product_ids = dataset["id"].astype(str).tolist()
 	series = torch.tensor(dataset[day_cols].to_numpy(dtype="float32"), dtype=torch.float32)
-	return product_ids, series
+	return product_ids, day_cols, series
+
+
+def load_calendar_matrix(day_cols: List[str], data_size: int) -> torch.Tensor | None:
+	if data_size == 1:
+		return None
+
+	if not CALENDAR_PATH.exists():
+		raise FileNotFoundError(f"Calendar file not found: {CALENDAR_PATH}")
+
+	calendar_values, calendar_feature_names = load_calendar_features(
+		CALENDAR_PATH,
+		day_cols,
+		feature_set=CALENDAR_FEATURE_SET,
+	)
+	expected_calendar_features = data_size - 1
+	if calendar_values.shape[1] != expected_calendar_features:
+		raise ValueError(
+			f"Checkpoint expects {expected_calendar_features} calendar features (data_size={data_size}), "
+			f"but built {calendar_values.shape[1]} from calendar.csv."
+		)
+
+	print(
+		f"Loaded calendar covariates for backtest: {calendar_values.shape[1]} features "
+		f"over {calendar_values.shape[0]} days"
+	)
+	print(f"Sample calendar columns: {calendar_feature_names[:5]}")
+	return torch.tensor(calendar_values, dtype=torch.float32)
 
 
 def compute_metrics(y_true: torch.Tensor, y_pred: torch.Tensor) -> Dict[str, float]:
@@ -133,9 +163,23 @@ def normalize_context_batch(context_batch: torch.Tensor) -> Tuple[torch.Tensor, 
 	return normalized_context, context_mean.squeeze(1), safe_std.squeeze(1)
 
 
+def normalize_calendar_context(calendar_context: torch.Tensor) -> torch.Tensor:
+	"""Normalize calendar covariates for one rolling origin window."""
+
+	feature_mean = calendar_context.mean(dim=0, keepdim=True)
+	feature_std = calendar_context.std(dim=0, keepdim=True, unbiased=False)
+	safe_std = torch.where(
+		feature_std > NORMALIZATION_EPSILON,
+		feature_std,
+		torch.ones_like(feature_std),
+	)
+	return (calendar_context - feature_mean) / safe_std
+
+
 def run_rolling_backtest(
 	model: ConditionalGenerativeModel,
 	series: torch.Tensor,
+	calendar_matrix: torch.Tensor | None,
 	horizon: int,
 	device: str,
 	batch_size: int,
@@ -163,12 +207,24 @@ def run_rolling_backtest(
 	for origin_idx, origin in enumerate(origins, start=1):
 		true_values = series[:, origin]
 
+		normalized_calendar_window = None
+		if calendar_matrix is not None:
+			raw_calendar_window = calendar_matrix[origin - WINDOW_SIZE:origin, :]
+			normalized_calendar_window = normalize_calendar_context(raw_calendar_window)
+
 		pred_chunks = []
 		for start in range(0, num_products, batch_size):
 			end = min(start + batch_size, num_products)
 			raw_context = series[start:end, origin - WINDOW_SIZE:origin]
 			normalized_context, context_mean, context_std = normalize_context_batch(raw_context)
-			pred_mean = model_predict_mean(model, normalized_context.unsqueeze(-1), device)
+
+			if normalized_calendar_window is not None:
+				calendar_batch = normalized_calendar_window.unsqueeze(0).repeat(end - start, 1, 1)
+				model_context = torch.cat([normalized_context.unsqueeze(-1), calendar_batch], dim=2)
+			else:
+				model_context = normalized_context.unsqueeze(-1)
+
+			pred_mean = model_predict_mean(model, model_context, device)
 			pred_chunks.append(pred_mean * context_std + context_mean)
 
 		pred_values = torch.cat(pred_chunks, dim=0)
@@ -239,13 +295,17 @@ def main() -> None:
 	print(f"Device: {device}")
 
 	model = load_model(device=device)
-	product_ids, series = load_series_matrix(mode=args.mode)
+	model_data_size = model.net.gru.input_size
+	product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+	calendar_matrix = load_calendar_matrix(day_cols=day_cols, data_size=model_data_size)
 	print(f"Products: {len(product_ids)}")
 	print(f"Day columns in evaluation: {series.shape[1]}")
+	print(f"Model input size: {model_data_size}")
 
 	overall, per_origin, _all_true, _all_pred = run_rolling_backtest(
 		model=model,
 		series=series,
+		calendar_matrix=calendar_matrix,
 		horizon=args.horizon,
 		device=device,
 		batch_size=args.batch_size,

@@ -162,6 +162,16 @@ def normalize_windows_and_targets(windows, targets):
     normalized_targets = (targets - context_mean.squeeze(-1)) / safe_std.squeeze(-1)
     return normalized_windows.astype(np.float32), normalized_targets.astype(np.float32)
 
+
+def normalize_calendar_windows(calendar_windows):
+    """Normalize calendar covariates per window and feature."""
+
+    feature_mean = calendar_windows.mean(axis=1, keepdims=True)
+    feature_std = calendar_windows.std(axis=1, keepdims=True)
+    safe_std = np.where(feature_std > NORMALIZATION_EPSILON, feature_std, 1.0)
+    normalized = (calendar_windows - feature_mean) / safe_std
+    return normalized.astype(np.float32)
+
 # Process data: get the timer series, convert to floats, build sliding windows for NN input
 def process(days, calendar_features=None):
     """Build model-ready windows from sales history."""
@@ -184,7 +194,25 @@ def process(days, calendar_features=None):
     windows, targets = normalize_windows_and_targets(windows, targets)
 
     # Reshape to per-sample layout: each (product, window) pair becomes one sample
-    X = np.transpose(windows, (1, 0, 2)).reshape(-1, WINDOW_SIZE, 1).astype(np.float32)  # [num_samples, WINDOW_SIZE, 1]
+    sales_X = np.transpose(windows, (1, 0, 2)).reshape(-1, WINDOW_SIZE, 1).astype(np.float32)
+
+    if calendar_features is not None:
+        num_products = days_continuous.shape[0]
+        num_windows = windows.shape[0]
+
+        calendar_windows = np.array(
+            [calendar_features[i:i + WINDOW_SIZE] for i in range(num_windows)],
+            dtype=np.float32,
+        )
+        calendar_windows = normalize_calendar_windows(calendar_windows)
+
+        # Calendar values are day-level, so the same calendar window is repeated across products.
+        calendar_X = np.repeat(calendar_windows[np.newaxis, ...], repeats=num_products, axis=0)
+        calendar_X = calendar_X.reshape(-1, WINDOW_SIZE, calendar_windows.shape[-1]).astype(np.float32)
+        X = np.concatenate([sales_X, calendar_X], axis=2).astype(np.float32)
+    else:
+        X = sales_X
+
     y = np.transpose(targets, (1, 0)).reshape(-1, 1).astype(np.float32)   #This is predicting the immidiate next step [num_samples, num_steps_to_predict], would be interesting to see how it would work for multiple days in the future
 
     return X, y

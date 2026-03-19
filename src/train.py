@@ -2,14 +2,16 @@ import sys
 import os
 import json
 import time
+import gc
 from pathlib import Path
 import pandas as pd
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datapreprocessing import process, WINDOW_SIZE, load_calendar_features
+from datapreprocessing import WINDOW_SIZE, load_calendar_features
 from src.NN import createGenerativeGRUNN, ConditionalGenerativeModel, ensemble_nll_loss
 from src.scoringrules import energy, kernel, energy_kernel
 
@@ -44,6 +46,68 @@ MODEL_FILE = ARTIFACTS_DIR / 'model_checkpoint.pt'
 METADATA_FILE = ARTIFACTS_DIR / 'model_metadata.json'
 
 
+def _day_sort_key(day_col_name):
+    return int(day_col_name.split('_', maxsplit=1)[1])
+
+
+class TimeSeriesWindowDataset(Dataset):
+    """Build training samples lazily to avoid materializing huge X/y tensors."""
+
+    def __init__(self, sales_matrix, window_size, calendar_features=None):
+        self.sales_matrix = np.asarray(sales_matrix, dtype=np.float32)
+        self.window_size = window_size
+        self.calendar_features = None if calendar_features is None else np.asarray(calendar_features, dtype=np.float32)
+
+        if self.sales_matrix.ndim != 2:
+            raise ValueError('sales_matrix must be 2D [num_products, num_days].')
+
+        self.num_products, self.num_days = self.sales_matrix.shape
+        self.num_windows = self.num_days - self.window_size
+        if self.num_windows <= 0:
+            raise ValueError('Not enough day columns to create at least one training sample.')
+
+        if self.calendar_features is not None:
+            if self.calendar_features.ndim != 2:
+                raise ValueError('calendar_features must be 2D [num_days, num_features].')
+            if self.calendar_features.shape[0] != self.num_days:
+                raise ValueError(
+                    f'calendar_features day count ({self.calendar_features.shape[0]}) does not match '
+                    f'sales day count ({self.num_days}).'
+                )
+
+        self.data_size = 1 if self.calendar_features is None else 1 + self.calendar_features.shape[1]
+
+    def __len__(self):
+        return self.num_products * self.num_windows
+
+    def __getitem__(self, index):
+        product_idx = index // self.num_windows
+        window_start = index % self.num_windows
+        window_end = window_start + self.window_size
+
+        sales_window = self.sales_matrix[product_idx, window_start:window_end]
+        target_value = self.sales_matrix[product_idx, window_end]
+
+        sales_mean = float(sales_window.mean())
+        sales_std = float(sales_window.std())
+        safe_std = sales_std if sales_std > 1e-8 else 1.0
+
+        normalized_sales = ((sales_window - sales_mean) / safe_std).astype(np.float32)
+        normalized_target = np.array([(target_value - sales_mean) / safe_std], dtype=np.float32)
+
+        sample_features = normalized_sales.reshape(self.window_size, 1)
+
+        if self.calendar_features is not None:
+            calendar_window = self.calendar_features[window_start:window_end, :]
+            cal_mean = calendar_window.mean(axis=0, keepdims=True)
+            cal_std = calendar_window.std(axis=0, keepdims=True)
+            safe_cal_std = np.where(cal_std > 1e-8, cal_std, 1.0)
+            normalized_calendar = ((calendar_window - cal_mean) / safe_cal_std).astype(np.float32)
+            sample_features = np.concatenate([sample_features, normalized_calendar], axis=1)
+
+        return torch.from_numpy(sample_features), torch.from_numpy(normalized_target)
+
+
 def score_rule_loss(ensemble_preds, targets, score_fn):
     """Average a scoring rule across the batch."""
 
@@ -69,25 +133,32 @@ def compute_loss(ensemble_preds, targets, loss_name):
 
 
 def load_and_preprocess():
-    """Load data from CSV, call process() from datapreprocessing, return X, y tensors ready for NN."""
+    """Load selected columns and return a lazy training dataset."""
 
-    # This is just pulled from the datapreprocessing, ill clean this up later
-    dataset = pd.read_csv(DATA_PATH)
+    metadata_cols = ['id', 'item_id', 'dept_id', 'cat_id', 'store_id', 'state_id']
+
+    header_columns = pd.read_csv(DATA_PATH, nrows=0).columns.tolist()
+    all_day_cols = sorted([col for col in header_columns if col.startswith('d_')], key=_day_sort_key)
+    if not all_day_cols:
+        raise ValueError('No day columns found in sales file.')
+
+    if QUICK_RUN:
+        days_to_keep = max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)
+        selected_day_cols = all_day_cols[-days_to_keep:]
+    else:
+        selected_day_cols = all_day_cols
+
+    usecols = metadata_cols + selected_day_cols
+    dtype_map = {day_col: 'int16' for day_col in selected_day_cols}
+    dataset = pd.read_csv(DATA_PATH, usecols=usecols, dtype=dtype_map)
 
     if QUICK_RUN:
         dataset = dataset.head(MAX_PRODUCTS)
 
-    metadata_cols = ['id', 'item_id', 'dept_id', 'cat_id', 'store_id', 'state_id']
-    days_cols = [col for col in dataset.columns if col not in metadata_cols]
-    days = dataset[days_cols]
-
-    if QUICK_RUN:
-        days_to_keep = max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)
-        days = days.iloc[:, -days_to_keep:]
-
-    selected_day_cols = days.columns.tolist()
+    sales_matrix = dataset[selected_day_cols].to_numpy(dtype=np.float32, copy=True)
 
     calendar_features = None
+    calendar_feature_names = []
     if USE_CALENDAR_FEATURES:
         if not CALENDAR_PATH.exists():
             raise FileNotFoundError(f'Calendar file not found: {CALENDAR_PATH}')
@@ -103,18 +174,21 @@ def load_and_preprocess():
         print(f"Calendar feature set: {CALENDAR_FEATURE_SET}")
         print(f"Sample calendar columns: {calendar_feature_names[:5]}")
 
-    X, y = process(days, calendar_features=calendar_features)
+    del dataset
+    gc.collect()
 
-    X_tensor = torch.from_numpy(X).float()
-    y_tensor = torch.from_numpy(y).float()
+    train_dataset = TimeSeriesWindowDataset(
+        sales_matrix=sales_matrix,
+        window_size=WINDOW_SIZE,
+        calendar_features=calendar_features,
+    )
 
-    return X_tensor, y_tensor
+    return train_dataset, train_dataset.data_size, calendar_feature_names
 
 
-def create_train_loader(X, y, batch_size=64):
-    """Wrap the full training tensors in a shuffled DataLoader."""
+def create_train_loader(dataset, batch_size=64):
+    """Wrap the lazy dataset in a shuffled DataLoader."""
 
-    dataset = TensorDataset(X, y)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -123,7 +197,7 @@ def create_train_loader(X, y, batch_size=64):
     )
 
 
-def save_artifacts(model, device, loss_name, final_loss):
+def save_artifacts(model, device, loss_name, final_loss, data_size, calendar_feature_names):
     """Persist model weights and minimal training metadata."""
 
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -131,6 +205,7 @@ def save_artifacts(model, device, loss_name, final_loss):
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'loss_name': loss_name,
+        'data_size': data_size,
         'noise_size': 8,
         'gru_hidden_size': 64,
         'output_size': 1,
@@ -148,13 +223,17 @@ def save_artifacts(model, device, loss_name, final_loss):
         'max_day_columns': MAX_DAY_COLUMNS,
         'batch_size': BATCH_SIZE,
         'epochs': EPOCHS,
+        'use_calendar_features': USE_CALENDAR_FEATURES,
+        'calendar_feature_set': CALENDAR_FEATURE_SET,
+        'calendar_feature_names': calendar_feature_names,
+        'data_size': data_size,
         'final_epoch_loss': final_loss,
     }
     with METADATA_FILE.open('w', encoding='utf-8') as file_handle:
         json.dump(metadata, file_handle, indent=2)
 
 
-def train_model(train_loader, data_size, loss_name=LOSS_NAME):
+def train_model(train_loader, data_size, calendar_feature_names, loss_name=LOSS_NAME):
     """Create NN model and minimal training setup."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
@@ -224,7 +303,7 @@ def train_model(train_loader, data_size, loss_name=LOSS_NAME):
         average_epoch_loss = epoch_loss / len(train_loader.dataset)
         print(f"Epoch {epoch + 1}/{epochs} - loss: {average_epoch_loss:.6f}")
 
-    save_artifacts(model, device, loss_name, average_epoch_loss)
+    save_artifacts(model, device, loss_name, average_epoch_loss, data_size, calendar_feature_names)
     print(f"Saved model checkpoint: {MODEL_FILE}")
     print(f"Saved training metadata: {METADATA_FILE}")
 
@@ -234,14 +313,18 @@ def train_model(train_loader, data_size, loss_name=LOSS_NAME):
 if __name__ == '__main__':
     print(f'Calendar features enabled: {USE_CALENDAR_FEATURES}')
     print(f'Calendar path: {CALENDAR_PATH}')
-    print('Expected model input features: 1 (sales only)')
-    if USE_CALENDAR_FEATURES:
-        print(f'Calendar feature set selected: {CALENDAR_FEATURE_SET}')
+    print(f'Calendar feature set: {CALENDAR_FEATURE_SET}')
 
-    X, y = load_and_preprocess()
-    train_loader = create_train_loader(X, y, batch_size=BATCH_SIZE)
-    print(f"Data shapes - X: {X.shape}, y: {y.shape}")
+    train_dataset, data_size, calendar_feature_names = load_and_preprocess()
+    train_loader = create_train_loader(train_dataset, batch_size=BATCH_SIZE)
+    print(f"Training samples: {len(train_dataset)}")
+    print(f"Model input features: {data_size}")
     print(f"Training batches: {len(train_loader)}")
     if QUICK_RUN:
         print(f"Quick run enabled - products: {MAX_PRODUCTS}, day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, batch_size: {BATCH_SIZE}, epochs: {EPOCHS}")
-    train_model(train_loader, data_size=X.shape[-1], loss_name=LOSS_NAME)
+    train_model(
+        train_loader,
+        data_size=data_size,
+        calendar_feature_names=calendar_feature_names,
+        loss_name=LOSS_NAME,
+    )
