@@ -3,6 +3,7 @@ import os
 import json
 import time
 import gc
+import math
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -36,6 +37,11 @@ BATCH_SIZE = 1024  # Samples per optimizer step.
 EPOCHS = 10  # Full passes over the selected training subset.
             # More epochs can improve fit but increase runtime linearly.
 
+# Temporal split ratios for train/val/test. The code will compute actual window boundaries based on the total number of windows.
+TRAIN_SPLIT = 0.6
+VAL_SPLIT = 0.2
+TEST_SPLIT = 0.2
+
 # Explicit FC sizes prevent the default architecture from shrinking to a tiny last hidden layer.
 FC_HIDDEN_SIZES = [128, 64, 32]
 
@@ -53,7 +59,7 @@ def _day_sort_key(day_col_name):
 class TimeSeriesWindowDataset(Dataset):
     """Build training samples lazily to avoid materializing huge X/y tensors."""
 
-    def __init__(self, sales_matrix, window_size, calendar_features=None):
+    def __init__(self, sales_matrix, window_size, calendar_features=None, window_start=0, window_end=None):
         self.sales_matrix = np.asarray(sales_matrix, dtype=np.float32)
         self.window_size = window_size
         self.calendar_features = None if calendar_features is None else np.asarray(calendar_features, dtype=np.float32)
@@ -65,6 +71,17 @@ class TimeSeriesWindowDataset(Dataset):
         self.num_windows = self.num_days - self.window_size
         if self.num_windows <= 0:
             raise ValueError('Not enough day columns to create at least one training sample.')
+
+        if window_end is None:
+            window_end = self.num_windows
+        if window_start < 0 or window_end > self.num_windows or window_start >= window_end:
+            raise ValueError(
+                f'Invalid window range [{window_start}, {window_end}) for {self.num_windows} available windows.'
+            )
+
+        self.window_start = window_start
+        self.window_end = window_end
+        self.split_num_windows = self.window_end - self.window_start
 
         if self.calendar_features is not None:
             if self.calendar_features.ndim != 2:
@@ -78,11 +95,12 @@ class TimeSeriesWindowDataset(Dataset):
         self.data_size = 1 if self.calendar_features is None else 1 + self.calendar_features.shape[1]
 
     def __len__(self):
-        return self.num_products * self.num_windows
+        return self.num_products * self.split_num_windows
 
     def __getitem__(self, index):
-        product_idx = index // self.num_windows
-        window_start = index % self.num_windows
+        product_idx = index // self.split_num_windows
+        local_window_start = index % self.split_num_windows
+        window_start = self.window_start + local_window_start
         window_end = window_start + self.window_size
 
         sales_window = self.sales_matrix[product_idx, window_start:window_end]
@@ -132,8 +150,24 @@ def compute_loss(ensemble_preds, targets, loss_name):
     raise ValueError(f"Unknown loss_name: {loss_name}")
 
 
+def _compute_temporal_split_indices(total_windows):
+    """Return chronological window boundaries for 60/20/20 split."""
+
+    if total_windows < 5:
+        raise ValueError('Need at least 5 windows to perform a 60/20/20 temporal split.')
+
+    train_end = int(math.floor(total_windows * TRAIN_SPLIT))
+    val_end = int(math.floor(total_windows * (TRAIN_SPLIT + VAL_SPLIT)))
+
+    # Keep each split non-empty even for small debug runs.
+    train_end = max(1, min(train_end, total_windows - 2))
+    val_end = max(train_end + 1, min(val_end, total_windows - 1))
+
+    return train_end, val_end
+
+
 def load_and_preprocess():
-    """Load selected columns and return a lazy training dataset."""
+    """Load selected columns and return lazy train/val/test datasets."""
 
     metadata_cols = ['id', 'item_id', 'dept_id', 'cat_id', 'store_id', 'state_id']
 
@@ -177,27 +211,58 @@ def load_and_preprocess():
     del dataset
     gc.collect()
 
-    train_dataset = TimeSeriesWindowDataset(
+    base_dataset = TimeSeriesWindowDataset(
         sales_matrix=sales_matrix,
         window_size=WINDOW_SIZE,
         calendar_features=calendar_features,
     )
 
-    return train_dataset, train_dataset.data_size, calendar_feature_names
+    train_end, val_end = _compute_temporal_split_indices(base_dataset.num_windows)
+
+    train_dataset = TimeSeriesWindowDataset(
+        sales_matrix=sales_matrix,
+        window_size=WINDOW_SIZE,
+        calendar_features=calendar_features,
+        window_start=0,
+        window_end=train_end,
+    )
+    val_dataset = TimeSeriesWindowDataset(
+        sales_matrix=sales_matrix,
+        window_size=WINDOW_SIZE,
+        calendar_features=calendar_features,
+        window_start=train_end,
+        window_end=val_end,
+    )
+    test_dataset = TimeSeriesWindowDataset(
+        sales_matrix=sales_matrix,
+        window_size=WINDOW_SIZE,
+        calendar_features=calendar_features,
+        window_start=val_end,
+        window_end=base_dataset.num_windows,
+    )
+
+    split_info = {
+        'total_windows': base_dataset.num_windows,
+        'train_windows': train_end,
+        'val_windows': val_end - train_end,
+        'test_windows': base_dataset.num_windows - val_end,
+    }
+
+    return train_dataset, val_dataset, test_dataset, base_dataset.data_size, calendar_feature_names, split_info
 
 
-def create_train_loader(dataset, batch_size=64):
-    """Wrap the lazy dataset in a shuffled DataLoader."""
+def create_data_loader(dataset, batch_size=64, shuffle=False):
+    """Wrap a lazy dataset in a DataLoader."""
 
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
         pin_memory=torch.cuda.is_available()
     )
 
 
-def save_artifacts(model, device, loss_name, final_loss, data_size, calendar_feature_names):
+def save_artifacts(model, device, loss_name, final_loss, best_val_loss, test_loss, data_size, calendar_feature_names, split_info):
     """Persist model weights and minimal training metadata."""
 
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -228,12 +293,44 @@ def save_artifacts(model, device, loss_name, final_loss, data_size, calendar_fea
         'calendar_feature_names': calendar_feature_names,
         'data_size': data_size,
         'final_epoch_loss': final_loss,
+        'best_val_loss': best_val_loss,
+        'test_loss': test_loss,
+        'split_strategy': 'temporal_windows',
+        'split_ratios': {
+            'train': TRAIN_SPLIT,
+            'val': VAL_SPLIT,
+            'test': TEST_SPLIT,
+        },
+        'split_windows': split_info,
     }
     with METADATA_FILE.open('w', encoding='utf-8') as file_handle:
         json.dump(metadata, file_handle, indent=2)
 
 
-def train_model(train_loader, data_size, calendar_feature_names, loss_name=LOSS_NAME):
+def evaluate_model(model, data_loader, device, loss_name):
+    """Compute average loss for a data split without gradient updates."""
+
+    model.eval()
+    total_loss = 0.0
+    total_count = 0
+    with torch.no_grad():
+        for context_batch, target_batch in data_loader:
+            context_batch = context_batch.to(device, non_blocking=True)
+            target_batch = target_batch.to(device, non_blocking=True)
+            ensemble_preds = model(context_batch)
+            loss = compute_loss(ensemble_preds, target_batch, loss_name)
+            batch_size = context_batch.size(0)
+            total_loss += loss.item() * batch_size
+            total_count += batch_size
+    model.train()
+
+    if total_count == 0:
+        raise ValueError('DataLoader has no samples for evaluation.')
+
+    return total_loss / total_count
+
+
+def train_model(train_loader, val_loader, test_loader, data_size, calendar_feature_names, split_info, loss_name=LOSS_NAME):
     """Create NN model and minimal training setup."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
@@ -270,6 +367,8 @@ def train_model(train_loader, data_size, calendar_feature_names, loss_name=LOSS_
     print(f"Training setup - epochs: {epochs}, learning_rate: {learning_rate}, loss: {loss_name}, data_size: {data_size}")
 
     average_epoch_loss = None
+    best_val_loss = float('inf')
+    best_state_dict = None
 
     for epoch in range(epochs):
         epoch_loss = 0.0
@@ -301,9 +400,34 @@ def train_model(train_loader, data_size, calendar_feature_names, loss_name=LOSS_
                 )
 
         average_epoch_loss = epoch_loss / len(train_loader.dataset)
-        print(f"Epoch {epoch + 1}/{epochs} - loss: {average_epoch_loss:.6f}")
+        val_loss = evaluate_model(model, val_loader, device, loss_name)
 
-    save_artifacts(model, device, loss_name, average_epoch_loss, data_size, calendar_feature_names)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state_dict = {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
+
+        print(
+            f"Epoch {epoch + 1}/{epochs} - "
+            f"train_loss: {average_epoch_loss:.6f}, val_loss: {val_loss:.6f}, best_val: {best_val_loss:.6f}"
+        )
+
+    if best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+
+    test_loss = evaluate_model(model, test_loader, device, loss_name)
+    print(f"Test loss (best-val checkpoint): {test_loss:.6f}")
+
+    save_artifacts(
+        model,
+        device,
+        loss_name,
+        average_epoch_loss,
+        best_val_loss,
+        test_loss,
+        data_size,
+        calendar_feature_names,
+        split_info,
+    )
     print(f"Saved model checkpoint: {MODEL_FILE}")
     print(f"Saved training metadata: {METADATA_FILE}")
 
@@ -315,16 +439,28 @@ if __name__ == '__main__':
     print(f'Calendar path: {CALENDAR_PATH}')
     print(f'Calendar feature set: {CALENDAR_FEATURE_SET}')
 
-    train_dataset, data_size, calendar_feature_names = load_and_preprocess()
-    train_loader = create_train_loader(train_dataset, batch_size=BATCH_SIZE)
+    train_dataset, val_dataset, test_dataset, data_size, calendar_feature_names, split_info = load_and_preprocess()
+    train_loader = create_data_loader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = create_data_loader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = create_data_loader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
     print(f"Training samples: {len(train_dataset)}")
+    print(f"Validation samples: {len(val_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
     print(f"Model input features: {data_size}")
     print(f"Training batches: {len(train_loader)}")
+    print(
+        f"Temporal split windows - train: {split_info['train_windows']}, "
+        f"val: {split_info['val_windows']}, test: {split_info['test_windows']} "
+        f"(total: {split_info['total_windows']})"
+    )
     if QUICK_RUN:
         print(f"Quick run enabled - products: {MAX_PRODUCTS}, day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, batch_size: {BATCH_SIZE}, epochs: {EPOCHS}")
     train_model(
         train_loader,
+        val_loader,
+        test_loader,
         data_size=data_size,
         calendar_feature_names=calendar_feature_names,
+        split_info=split_info,
         loss_name=LOSS_NAME,
     )
