@@ -8,6 +8,7 @@ and R2 with a concise CLI summary.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from typing import Dict, List, Tuple
 
@@ -22,6 +23,7 @@ from train import (
 	DATA_PATH,
 	MAX_DAY_COLUMNS,
 	MAX_PRODUCTS,
+	METADATA_FILE,
 	MODEL_FILE,
 	TRAIN_SPLIT,
 	VAL_SPLIT,
@@ -125,10 +127,42 @@ def load_calendar_matrix(day_cols: List[str], data_size: int) -> torch.Tensor | 
 		feature_set=CALENDAR_FEATURE_SET,
 	)
 	expected_calendar_features = data_size - 1
+
+	if METADATA_FILE.exists():
+		with METADATA_FILE.open("r", encoding="utf-8") as file_handle:
+			metadata = json.load(file_handle)
+		expected_feature_names = metadata.get("calendar_feature_names", [])
+		if isinstance(expected_feature_names, list) and len(expected_feature_names) > 0:
+			# Rebuild in training order and keep missing categories as zero columns.
+			feature_to_idx = {name: idx for idx, name in enumerate(calendar_feature_names)}
+			aligned_columns = []
+			missing_names = []
+			for feature_name in expected_feature_names:
+				feature_idx = feature_to_idx.get(feature_name)
+				if feature_idx is None:
+					aligned_columns.append(torch.zeros(len(day_cols), dtype=torch.float32).numpy())
+					missing_names.append(feature_name)
+				else:
+					aligned_columns.append(calendar_values[:, feature_idx])
+
+			calendar_values = torch.stack(
+				[torch.tensor(column, dtype=torch.float32) for column in aligned_columns],
+				dim=1,
+			).numpy()
+			calendar_feature_names = expected_feature_names
+
+			if missing_names:
+				preview = ", ".join(missing_names[:5])
+				print(
+					"Warning: Missing calendar features from current slice were zero-filled: "
+					f"{preview}"
+				)
+
 	if calendar_values.shape[1] != expected_calendar_features:
 		raise ValueError(
 			f"Checkpoint expects {expected_calendar_features} calendar features (data_size={data_size}), "
-			f"but built {calendar_values.shape[1]} from calendar.csv."
+			f"but built {calendar_values.shape[1]} from calendar.csv. "
+			f"If this checkpoint was trained with rich calendar features, ensure {METADATA_FILE} is present."
 		)
 
 	print(
