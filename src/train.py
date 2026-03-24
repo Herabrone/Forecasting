@@ -433,6 +433,19 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
     return model
 
+# Gamma: median of pairwise distances between all pairs, in validation
+def gaussian_kernel_gamma(time_series):
+
+    vals = torch.tensor(time_series.flatten(), dtype = torch.float32) # Turn into a vector
+
+    # Pairwise absolute differences
+    differences = torch.abs(vals.unsqueeze(0) - vals.unsqueeze(1))
+
+    # Get the upper triangle (without diagonal)
+    upper_tri = torch.triu(torch.ones_like(differences), diagonal = 1).bool()
+
+    # Take the median
+    return differences[upper_tri].median().item()
 
 if __name__ == '__main__':
     print(f'Calendar features enabled: {USE_CALENDAR_FEATURES}')
@@ -440,6 +453,11 @@ if __name__ == '__main__':
     print(f'Calendar feature set: {CALENDAR_FEATURE_SET}')
 
     train_dataset, val_dataset, test_dataset, data_size, calendar_feature_names, split_info = load_and_preprocess()
+
+    # Uncomment these lines to calculate the gamma parameter for the Kernel Score
+    # gamma = gaussian_kernel_gamma(val_dataset.sales_matrix[:,val_dataset.window_start:val_dataset.window_end])
+    # print(f"Gamma = {gamma}")
+    
     train_loader = create_data_loader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = create_data_loader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = create_data_loader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
