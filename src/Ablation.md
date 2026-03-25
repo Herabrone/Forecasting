@@ -81,7 +81,7 @@ Forecasting/artifacts/ablation_feature_zero.csv
 
 ### B) Ensemble-size ablation (`ensemble_size`)
 
-Change number of stochastic draws per forecast.
+Change number of ensemble draws per forecast.
 
 ```powershell
 python .\ablation.py --checkpoint _Energy_fullCalendar ensemble_size --num-generations 5 10 20 50
@@ -141,14 +141,3 @@ Example with eval controls:
 
 ```powershell
 python .\ablation.py --checkpoint _Energy_fullCalendar --mode quick --eval-split test --max-origins 100 feature_zero --zero-groups event
-```
-
-## 5) What this does not change
-
-Checkpoint-only ablations do not change core architecture choices like:
-
-```text
-window size, GRU hidden size, GRU layer count, noise size
-```
-
-Those require training a new model configuration.

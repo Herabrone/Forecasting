@@ -369,7 +369,7 @@ def _unfreeze_params(module: torch.nn.Module) -> None:
         p.requires_grad = True
 
 
-def _get_finetune_loaders(args: argparse.Namespace, data_size: int):
+def _get_finetune_loaders(args: argparse.Namespace, data_size: int, metadata_path: Path | None = None):
     """Build train + val DataLoaders for fine-tuning (reuses train.py logic)."""
     import gc
     import numpy as np
@@ -393,11 +393,40 @@ def _get_finetune_loaders(args: argparse.Namespace, data_size: int):
 
     sales_matrix = dataset[selected_day_cols].to_numpy(dtype=np.float32, copy=True)
 
+    metadata = _load_metadata(metadata_path) if metadata_path is not None else {}
+
     calendar_features = None
     if data_size > 1:
-        calendar_features_arr, _ = load_calendar_features(
-            CALENDAR_PATH, selected_day_cols, feature_set=CALENDAR_FEATURE_SET,
+        feature_set = CALENDAR_FEATURE_SET
+        if metadata_path is not None:
+            feature_set = metadata.get("calendar_feature_set", CALENDAR_FEATURE_SET)
+
+        calendar_features_arr, calendar_feature_names = load_calendar_features(
+            CALENDAR_PATH, selected_day_cols, feature_set=feature_set,
         )
+
+        expected_feature_names = metadata.get("calendar_feature_names", [])
+        if isinstance(expected_feature_names, list) and len(expected_feature_names) > 0:
+            feature_to_idx = {name: idx for idx, name in enumerate(calendar_feature_names)}
+            aligned_columns = []
+            for feature_name in expected_feature_names:
+                feature_idx = feature_to_idx.get(feature_name)
+                if feature_idx is None:
+                    aligned_columns.append(np.zeros(len(selected_day_cols), dtype=np.float32))
+                else:
+                    aligned_columns.append(calendar_features_arr[:, feature_idx])
+
+            calendar_features_arr = np.column_stack(aligned_columns).astype(np.float32)
+            calendar_feature_names = expected_feature_names
+
+        expected_calendar_features = data_size - 1
+        if calendar_features_arr.shape[1] != expected_calendar_features:
+            raise ValueError(
+                f"Feature mismatch for fine-tune loader: checkpoint expects "
+                f"{expected_calendar_features} calendar features (data_size={data_size}), "
+                f"but loader produced {calendar_features_arr.shape[1]} using feature_set='{feature_set}'."
+            )
+
         calendar_features = calendar_features_arr
 
     del dataset
@@ -495,7 +524,7 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
         raise ValueError(f"--freeze must be 'gru' or 'fc', got '{args.freeze}'")
 
     print(f"Ablation: {label}")
-    train_loader, val_loader = _get_finetune_loaders(args, data_size)
+    train_loader, val_loader = _get_finetune_loaders(args, data_size, metadata_path=metadata_path)
     model = _finetune(model, train_loader, val_loader, args.finetune_epochs, loss_name, device, lr=args.lr)
 
     # Evaluate on backtest
