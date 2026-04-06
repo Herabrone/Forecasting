@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -50,6 +51,7 @@ PROGRESS_EVERY = 50  # Print progress/ETA every N batches to show how close trai
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / 'artifacts'
 MODEL_FILE = ARTIFACTS_DIR / 'model_checkpoint.pt'
 METADATA_FILE = ARTIFACTS_DIR / 'model_metadata.json'
+LOSS_PLOT_FILE = ARTIFACTS_DIR / 'loss_vs_epoch.png'
 
 
 def _day_sort_key(day_col_name):
@@ -295,6 +297,7 @@ def save_artifacts(model, device, loss_name, final_loss, best_val_loss, test_los
         'final_epoch_loss': final_loss,
         'best_val_loss': best_val_loss,
         'test_loss': test_loss,
+        'loss_plot_path': str(LOSS_PLOT_FILE),
         'split_strategy': 'temporal_windows',
         'split_ratios': {
             'train': TRAIN_SPLIT,
@@ -305,6 +308,24 @@ def save_artifacts(model, device, loss_name, final_loss, best_val_loss, test_los
     }
     with METADATA_FILE.open('w', encoding='utf-8') as file_handle:
         json.dump(metadata, file_handle, indent=2)
+
+
+def save_loss_plot(train_losses, val_losses, output_path):
+    """Plot training and validation losses across epochs and save as a PNG."""
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    epochs = list(range(1, len(train_losses) + 1))
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_losses, marker='o', label='Train loss')
+    plt.plot(epochs, val_losses, marker='o', label='Validation loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Loss vs Epoch')
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
 
 
 def evaluate_model(model, data_loader, device, loss_name):
@@ -369,6 +390,8 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
     average_epoch_loss = None
     best_val_loss = float('inf')
     best_state_dict = None
+    train_losses = []
+    val_losses = []
 
     for epoch in range(epochs):
         epoch_loss = 0.0
@@ -402,6 +425,9 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
         average_epoch_loss = epoch_loss / len(train_loader.dataset)
         val_loss = evaluate_model(model, val_loader, device, loss_name)
 
+        train_losses.append(average_epoch_loss)
+        val_losses.append(val_loss)
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_state_dict = {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
@@ -416,6 +442,9 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
     test_loss = evaluate_model(model, test_loader, device, loss_name)
     print(f"Test loss (best-val checkpoint): {test_loss:.6f}")
+
+    save_loss_plot(train_losses, val_losses, LOSS_PLOT_FILE)
+    print(f"Saved loss plot: {LOSS_PLOT_FILE}")
 
     save_artifacts(
         model,

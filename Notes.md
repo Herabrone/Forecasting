@@ -8,7 +8,7 @@ We can look into how changing the way we predict the future can affect the final
 # March 16
 We may also could see how changing the noise affect the results as well
 
-Initail training results:
+Initail training results: 
 Mode: quick
 Horizon: 1 day
 Origins evaluated: 355
@@ -66,7 +66,7 @@ Low-variance origins (sst < 1e-6): 1
 Which is kinda unfourtunate since our R2 has actually decreased from .67, however I think that we got the .67 due to ovverfitting and allowing the training data to see the entire data set. We should consider this our actual baseline by just using the time series data. Ill try training with the calendar csv later today...
 
 # more about the calendar preprocessing
-
+    
 The preprocessing for the calendar.csv starts quite intuitively, we simple just match the days to the day in our time series data one to one (also I dropped the d_ prefix so its just numerical data).
 
 The actual features we can capture are a little more interesting.
