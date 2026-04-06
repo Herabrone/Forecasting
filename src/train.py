@@ -31,9 +31,9 @@ MAX_PRODUCTS = 1000  # Number of product time series to keep when QUICK_RUN=True
 MAX_DAY_COLUMNS = 365  # Number of most recent day columns to keep when QUICK_RUN=True.
                        # Must be >= WINDOW_SIZE + 1 to form at least one input-target pair.
 
-BATCH_SIZE = 1024  # Samples per optimizer step.
+BATCH_SIZE = 8192  # Samples per optimizer step.
                    # Larger batches usually increase throughput on GPU but require more VRAM.
-                   # If you hit CUDA OOM, lower this first (for example: 512, then 256).
+                   # If you hit CUDA OOM, lower this first (for example: 4096, then 2048).
 
 EPOCHS = 10  # Full passes over the selected training subset.
             # More epochs can improve fit but increase runtime linearly.
@@ -260,7 +260,9 @@ def create_data_loader(dataset, batch_size=64, shuffle=False):
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=torch.cuda.is_available(),
+        num_workers=8,
+        prefetch_factor=2 if batch_size > 0 else None
     )
 
 
@@ -356,6 +358,7 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        torch.backends.cudnn.benchmark = True
     else:
         print("Using CPU")
 
@@ -387,6 +390,8 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
     print(f"Model ready on {device}. Batches per epoch: {batches_per_epoch}")
     print(f"Training setup - epochs: {epochs}, learning_rate: {learning_rate}, loss: {loss_name}, data_size: {data_size}")
 
+    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+
     average_epoch_loss = None
     best_val_loss = float('inf')
     best_state_dict = None
@@ -401,10 +406,19 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
             target_batch = target_batch.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            ensemble_preds = model(context_batch)
-            loss = compute_loss(ensemble_preds, target_batch, loss_name)
-            loss.backward()
-            optimizer.step()
+            
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    ensemble_preds = model(context_batch)
+                    loss = compute_loss(ensemble_preds, target_batch, loss_name)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                ensemble_preds = model(context_batch)
+                loss = compute_loss(ensemble_preds, target_batch, loss_name)
+                loss.backward()
+                optimizer.step()
 
             epoch_loss += loss.item() * context_batch.size(0)
 
