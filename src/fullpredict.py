@@ -1,8 +1,7 @@
-"""Comprehensive rolling backtest for 1-day-ahead probabilistic sales forecasts.
+"""Comprehensive rolling backtest for one-day-ahead probabilistic sales forecasts.
 
-This script evaluates a trained model by repeatedly forecasting the next day
-from a moving context window (rolling forecast origins). It reports MAE, RMSE,
-and R2 with a concise CLI summary.
+This script evaluates a trained forecasting model using a rolling context window
+and reports summary metrics including MAE, RMSE, and R².
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ METADATA_COLS = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Run rolling backtest and report MAE/RMSE/R2 in the CLI."
+		description="Execute a rolling backtest and report MAE, RMSE, and R² metrics."
 	)
 	parser.add_argument(
 		"--mode",
@@ -66,10 +65,10 @@ def parse_args() -> argparse.Namespace:
 		choices=["all", "val", "test"],
 		default="test",
 		help=(
-			"Temporal split to evaluate. "
-			"'test' (default) uses the held-out last 20%%, "
+			"Temporal split used for evaluation. "
+			"'test' uses the final 20%% of the series, "
 			"'val' uses the middle 20%%, "
-			"'all' evaluates every rolling origin."
+			"and 'all' evaluates every rolling origin."
 		),
 	)
 	return parser.parse_args()
@@ -329,16 +328,16 @@ def run_rolling_backtest(
 
 
 def print_summary(overall: Dict[str, float], per_origin: pd.DataFrame, mode: str, horizon: int, eval_split: str = "test") -> None:
-	print("\nBacktest summary")
+	print("\nRolling backtest summary")
 	print("-" * 72)
 	print(f"Mode: {mode}")
-	print(f"Eval split: {eval_split}")
-	print(f"Horizon: {horizon} day")
-	print(f"Origins evaluated: {len(per_origin)}")
+	print(f"Evaluation split: {eval_split}")
+	print(f"Forecast horizon: {horizon} day")
+	print(f"Rolling origins evaluated: {len(per_origin)}")
 	print("-" * 72)
 	print(f"Overall MAE : {overall['mae']:.4f}")
 	print(f"Overall RMSE: {overall['rmse']:.4f}")
-	print(f"Overall R2  : {overall['r2']:.4f}")
+	print(f"Overall R²  : {overall['r2']:.4f}")
 	print("-" * 72)
 	print("Per-origin metric means")
 	print(f"MAE mean:  {per_origin['mae'].mean():.4f}")

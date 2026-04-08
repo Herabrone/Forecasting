@@ -1,6 +1,6 @@
-"""Compare neural forecasts against classical time-series baselines.
+"""Compare a neural forecast model against classical time-series baselines.
 
-This script runs a 1-day-ahead rolling backtest on sales_train_validation.csv
+This script runs a one-day-ahead rolling backtest on sales_train_validation.csv
 using the same origin split strategy as fullpredict.py, then saves a leaderboard
 CSV and visual plots for model comparison.
 """
@@ -31,7 +31,7 @@ from fullpredict import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare neural model vs classical baselines with plots."
+        description="Compare forecast models using rolling backtest metrics and presentation-ready plots."
     )
     parser.add_argument("--mode", choices=["quick", "full"], default="full")
     parser.add_argument("--eval-split", choices=["all", "val", "test"], default="test")
@@ -389,16 +389,16 @@ def plot_outputs(leaderboard_df: pd.DataFrame, per_origin_df: pd.DataFrame, outp
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
     axes[0].barh(ranked["model_display"], ranked["rmse"], color=bar_colors)
-    axes[0].set_title("RMSE (lower is better)")
+    axes[0].set_title("Root Mean Square Error (RMSE) comparison")
     axes[0].set_xlabel("RMSE")
     axes[0].grid(axis="x", alpha=0.2)
 
     axes[1].barh(ranked["model_display"], ranked["weighted_r2"], color=bar_colors)
-    axes[1].set_title("SST-weighted R2 (higher is better)")
-    axes[1].set_xlabel("Weighted R2")
+    axes[1].set_title("SST-weighted R² comparison")
+    axes[1].set_xlabel("Weighted R²")
     axes[1].grid(axis="x", alpha=0.2)
 
-    fig.suptitle("Forecast Model Shootout: Neural vs Classical Baselines", fontsize=15, fontweight="bold")
+    fig.suptitle("Forecast Model Performance Comparison", fontsize=15, fontweight="bold")
     fig.tight_layout()
     leaderboard_png = output_dir / "compare_models_leaderboard.png"
     fig.savefig(leaderboard_png, dpi=180, bbox_inches="tight")
@@ -414,7 +414,7 @@ def plot_outputs(leaderboard_df: pd.DataFrame, per_origin_df: pd.DataFrame, outp
                 trend,
                 color="#F26430",
                 linewidth=2.8,
-                label="Neural (your model)",
+                label="Neural forecast",
             )
         else:
             ax.plot(
@@ -449,7 +449,7 @@ def run_single_model(
     calendar_matrix: torch.Tensor | None,
 ) -> Tuple[np.ndarray, np.ndarray, str]:
     display_names = {
-        "neural": "Neural (your model)",
+        "neural": "Neural forecast",
         "seasonal7": "Seasonal-7",
         "seasonal28": "Seasonal-28",
         "ma7": "MovingAvg-7",
