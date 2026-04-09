@@ -1,3 +1,4 @@
+import argparse
 import sys
 import os
 import json
@@ -10,13 +11,17 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
+import datapreprocessing as dp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datapreprocessing import WINDOW_SIZE, load_calendar_features
+from datapreprocessing import load_calendar_features
+from config import cli_or_config, load_config, resolve_path
 from src.NN import createGenerativeGRUNN, ConditionalGenerativeModel, ensemble_nll_loss
 from src.scoringrules import energy, kernel, energy_kernel
 
+
+WINDOW_SIZE = dp.WINDOW_SIZE
 
 DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
 CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
@@ -45,6 +50,13 @@ TEST_SPLIT = 0.2
 
 # Explicit FC sizes prevent the default architecture from shrinking to a tiny last hidden layer.
 FC_HIDDEN_SIZES = [128, 64, 32]
+GRU_HIDDEN_SIZE = 64
+NOISE_SIZE = 8
+OUTPUT_SIZE = 1
+NUMBER_GENERATIONS_PER_FORWARD_CALL = 20
+LEARNING_RATE = 1e-3
+NUM_WORKERS = 8
+PREFETCH_FACTOR = 2
 
 PROGRESS_EVERY = 50  # Print progress/ETA every N batches to show how close training is to completion.
 
@@ -52,6 +64,102 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / 'artifacts'
 MODEL_FILE = ARTIFACTS_DIR / 'model_checkpoint.pt'
 METADATA_FILE = ARTIFACTS_DIR / 'model_metadata.json'
 LOSS_PLOT_FILE = ARTIFACTS_DIR / 'loss_vs_epoch.png'
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Train the probabilistic forecasting model.')
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
+    parser.add_argument('--mode', choices=['quick', 'full'], default=None, help='Run scope override.')
+    parser.add_argument('--loss-name', choices=['ensemble_nll', 'energy', 'kernel', 'energy_kernel'], default=None)
+    parser.add_argument('--epochs', type=int, default=None)
+    parser.add_argument('--batch-size', type=int, default=None)
+    parser.add_argument('--learning-rate', type=float, default=None)
+    parser.add_argument('--progress-every', type=int, default=None)
+    parser.add_argument('--max-products', type=int, default=None)
+    parser.add_argument('--max-day-columns', type=int, default=None)
+    parser.add_argument('--window-size', type=int, default=None)
+    parser.add_argument('--calendar-feature-set', choices=['minimal', 'rich'], default=None)
+    parser.add_argument('--train-split', type=float, default=None)
+    parser.add_argument('--val-split', type=float, default=None)
+    parser.add_argument('--test-split', type=float, default=None)
+    parser.add_argument('--num-workers', type=int, default=None)
+    parser.add_argument('--prefetch-factor', type=int, default=None)
+    parser.add_argument('--gru-hidden-size', type=int, default=None)
+    parser.add_argument('--noise-size', type=int, default=None)
+    parser.add_argument('--output-size', type=int, default=None)
+    parser.add_argument('--num-generations', type=int, default=None)
+    parser.add_argument('--fc-hidden-sizes', type=str, default=None, help='Comma-separated FC hidden sizes.')
+
+    calendar_group = parser.add_mutually_exclusive_group()
+    calendar_group.add_argument('--use-calendar-features', dest='use_calendar_features', action='store_true')
+    calendar_group.add_argument('--no-calendar-features', dest='use_calendar_features', action='store_false')
+    parser.set_defaults(use_calendar_features=None)
+
+    return parser.parse_args()
+
+
+def _parse_fc_hidden_sizes(raw_value):
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, list):
+        return [int(size) for size in raw_value]
+    return [int(size.strip()) for size in str(raw_value).split(',') if size.strip()]
+
+
+def apply_runtime_config(args: argparse.Namespace) -> None:
+    global WINDOW_SIZE
+    global DATA_PATH, CALENDAR_PATH, ARTIFACTS_DIR, MODEL_FILE, METADATA_FILE, LOSS_PLOT_FILE
+    global USE_CALENDAR_FEATURES, CALENDAR_FEATURE_SET, LOSS_NAME
+    global QUICK_RUN, MAX_PRODUCTS, MAX_DAY_COLUMNS
+    global BATCH_SIZE, EPOCHS, LEARNING_RATE, PROGRESS_EVERY
+    global TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT
+    global FC_HIDDEN_SIZES, GRU_HIDDEN_SIZE, NOISE_SIZE, OUTPUT_SIZE, NUMBER_GENERATIONS_PER_FORWARD_CALL
+    global NUM_WORKERS, PREFETCH_FACTOR
+
+    config = load_config(args.config)
+
+    DATA_PATH = resolve_path(config, 'data_path', DATA_PATH)
+    CALENDAR_PATH = resolve_path(config, 'calendar_path', CALENDAR_PATH)
+    ARTIFACTS_DIR = resolve_path(config, 'artifacts_dir', ARTIFACTS_DIR)
+    MODEL_FILE = resolve_path(config, 'model_file', MODEL_FILE)
+    METADATA_FILE = resolve_path(config, 'metadata_file', METADATA_FILE)
+    LOSS_PLOT_FILE = resolve_path(config, 'loss_plot_file', LOSS_PLOT_FILE)
+
+    mode = args.mode
+    if mode is None:
+        quick_from_config = cli_or_config(None, config, 'data', 'quick_run')
+        QUICK_RUN = bool(quick_from_config)
+    else:
+        QUICK_RUN = mode == 'quick'
+
+    WINDOW_SIZE = int(cli_or_config(args.window_size, config, 'data', 'window_size'))
+    dp.WINDOW_SIZE = WINDOW_SIZE
+
+    USE_CALENDAR_FEATURES = bool(cli_or_config(args.use_calendar_features, config, 'data', 'use_calendar_features'))
+    CALENDAR_FEATURE_SET = str(cli_or_config(args.calendar_feature_set, config, 'data', 'calendar_feature_set'))
+    MAX_PRODUCTS = int(cli_or_config(args.max_products, config, 'data', 'max_products'))
+    MAX_DAY_COLUMNS = int(cli_or_config(args.max_day_columns, config, 'data', 'max_day_columns'))
+
+    LOSS_NAME = str(cli_or_config(args.loss_name, config, 'training', 'loss_name'))
+    BATCH_SIZE = int(cli_or_config(args.batch_size, config, 'training', 'batch_size'))
+    EPOCHS = int(cli_or_config(args.epochs, config, 'training', 'epochs'))
+    LEARNING_RATE = float(cli_or_config(args.learning_rate, config, 'training', 'learning_rate'))
+    PROGRESS_EVERY = int(cli_or_config(args.progress_every, config, 'training', 'progress_every'))
+    TRAIN_SPLIT = float(cli_or_config(args.train_split, config, 'training', 'train_split'))
+    VAL_SPLIT = float(cli_or_config(args.val_split, config, 'training', 'val_split'))
+    TEST_SPLIT = float(cli_or_config(args.test_split, config, 'training', 'test_split'))
+    NUM_WORKERS = int(cli_or_config(args.num_workers, config, 'training', 'num_workers'))
+    PREFETCH_FACTOR = int(cli_or_config(args.prefetch_factor, config, 'training', 'prefetch_factor'))
+
+    FC_HIDDEN_SIZES = _parse_fc_hidden_sizes(
+        cli_or_config(args.fc_hidden_sizes, config, 'model', 'fc_hidden_sizes')
+    )
+    GRU_HIDDEN_SIZE = int(cli_or_config(args.gru_hidden_size, config, 'model', 'gru_hidden_size'))
+    NOISE_SIZE = int(cli_or_config(args.noise_size, config, 'model', 'noise_size'))
+    OUTPUT_SIZE = int(cli_or_config(args.output_size, config, 'model', 'output_size'))
+    NUMBER_GENERATIONS_PER_FORWARD_CALL = int(
+        cli_or_config(args.num_generations, config, 'model', 'number_generations_per_forward_call')
+    )
 
 
 def _day_sort_key(day_col_name):
@@ -261,8 +369,8 @@ def create_data_loader(dataset, batch_size=64, shuffle=False):
         batch_size=batch_size,
         shuffle=shuffle,
         pin_memory=torch.cuda.is_available(),
-        num_workers=8,
-        prefetch_factor=2 if batch_size > 0 else None
+        num_workers=NUM_WORKERS,
+        prefetch_factor=PREFETCH_FACTOR if batch_size > 0 and NUM_WORKERS > 0 else None,
     )
 
 
@@ -275,11 +383,11 @@ def save_artifacts(model, device, loss_name, final_loss, best_val_loss, test_los
         'model_state_dict': model.state_dict(),
         'loss_name': loss_name,
         'data_size': data_size,
-        'noise_size': 8,
-        'gru_hidden_size': 64,
-        'output_size': 1,
+        'noise_size': NOISE_SIZE,
+        'gru_hidden_size': GRU_HIDDEN_SIZE,
+        'output_size': OUTPUT_SIZE,
         'fc_hidden_sizes': FC_HIDDEN_SIZES,
-        'number_generations_per_forward_call': 20,
+        'number_generations_per_forward_call': NUMBER_GENERATIONS_PER_FORWARD_CALL,
     }
     torch.save(checkpoint, MODEL_FILE)
 
@@ -362,22 +470,22 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
     else:
         print("Using CPU")
 
-    noise_size = 8 # Size of the noise vector for the generative model, can be chaned to see how it affects the results
-    learning_rate = 1e-3
+    noise_size = NOISE_SIZE
+    learning_rate = LEARNING_RATE
     epochs = EPOCHS
     
     net = createGenerativeGRUNN(
         data_size=data_size,
-        gru_hidden_size=64,
+        gru_hidden_size=GRU_HIDDEN_SIZE,
         noise_size=noise_size,
-        output_size=1,
+        output_size=OUTPUT_SIZE,
         hidden_sizes=FC_HIDDEN_SIZES,
     )()
     
     model = ConditionalGenerativeModel(
         net=net,
         size_auxiliary_variable=noise_size,
-        number_generations_per_forward_call=20
+        number_generations_per_forward_call=NUMBER_GENERATIONS_PER_FORWARD_CALL
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -478,9 +586,19 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
 
 if __name__ == '__main__':
+    args = parse_args()
+    apply_runtime_config(args)
+
+    split_total = TRAIN_SPLIT + VAL_SPLIT + TEST_SPLIT
+    if not np.isclose(split_total, 1.0, atol=1e-6):
+        raise ValueError(
+            f'Split ratios must sum to 1.0. Got train+val+test={split_total:.6f}'
+        )
+
     print(f'Calendar features enabled: {USE_CALENDAR_FEATURES}')
     print(f'Calendar path: {CALENDAR_PATH}')
     print(f'Calendar feature set: {CALENDAR_FEATURE_SET}')
+    print(f'Config: quick_run={QUICK_RUN}, batch_size={BATCH_SIZE}, epochs={EPOCHS}, loss={LOSS_NAME}')
 
     train_dataset, val_dataset, test_dataset, data_size, calendar_feature_names, split_info = load_and_preprocess()
     train_loader = create_data_loader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
@@ -497,7 +615,11 @@ if __name__ == '__main__':
         f"(total: {split_info['total_windows']})"
     )
     if QUICK_RUN:
-        print(f"Quick run enabled - products: {MAX_PRODUCTS}, day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, batch_size: {BATCH_SIZE}, epochs: {EPOCHS}")
+        print(
+            f"Quick run enabled - products: {MAX_PRODUCTS}, "
+            f"day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, "
+            f"batch_size: {BATCH_SIZE}, epochs: {EPOCHS}"
+        )
     train_model(
         train_loader,
         val_loader,
