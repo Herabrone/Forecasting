@@ -20,22 +20,22 @@ from src.scoringrules import energy, kernel, energy_kernel
 
 DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
 CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
-USE_CALENDAR_FEATURES = False  # Toggle calendar covariates on/off.
+USE_CALENDAR_FEATURES = True  # Toggle calendar covariates on/off.
 CALENDAR_FEATURE_SET = 'rich'  # Supported values: 'minimal' or 'rich'.
-LOSS_NAME = 'ensemble_nll'  # Training objective to optimize. 'ensemble_nll' is usually the fastest and most stable.
+LOSS_NAME = 'energy'  # Training objective to optimize. 'ensemble_nll' is usually the fastest and most stable.
                              # Other options ('energy', 'kernel', 'energy_kernel') are valid but can train slower.
 
-QUICK_RUN = True  # If True, train on a subset for faster iteration. If False, use all products and all day columns.
+QUICK_RUN = False  # If True, train on a subset for faster iteration. If False, use all products and all day columns.
 
 MAX_PRODUCTS = 1000  # Number of product time series to keep when QUICK_RUN=True.
 MAX_DAY_COLUMNS = 365  # Number of most recent day columns to keep when QUICK_RUN=True.
                        # Must be >= WINDOW_SIZE + 1 to form at least one input-target pair.
 
-BATCH_SIZE = 8192  # Samples per optimizer step.
+BATCH_SIZE = 81920  # Samples per optimizer step.
                    # Larger batches usually increase throughput on GPU but require more VRAM.
                    # If you hit CUDA OOM, lower this first (for example: 4096, then 2048).
 
-EPOCHS = 10  # Full passes over the selected training subset.
+EPOCHS = 00  # Full passes over the selected training subset.
             # More epochs can improve fit but increase runtime linearly.
 
 # Temporal split ratios for train/val/test. The code will compute actual window boundaries based on the total number of windows.
