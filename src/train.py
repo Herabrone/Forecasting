@@ -218,7 +218,7 @@ class TimeSeriesWindowDataset(Dataset):
 
         sales_mean = float(sales_window.mean())
         sales_std = float(sales_window.std())
-        safe_std = sales_std if sales_std > 1e-8 else 1.0
+        safe_std = sales_std if sales_std > dp.NORMALIZATION_EPSILON else 1.0
 
         normalized_sales = ((sales_window - sales_mean) / safe_std).astype(np.float32)
         normalized_target = np.array([(target_value - sales_mean) / safe_std], dtype=np.float32)
@@ -229,7 +229,7 @@ class TimeSeriesWindowDataset(Dataset):
             calendar_window = self.calendar_features[window_start:window_end, :]
             cal_mean = calendar_window.mean(axis=0, keepdims=True)
             cal_std = calendar_window.std(axis=0, keepdims=True)
-            safe_cal_std = np.where(cal_std > 1e-8, cal_std, 1.0)
+            safe_cal_std = np.where(cal_std > dp.NORMALIZATION_EPSILON, cal_std, 1.0)
             normalized_calendar = ((calendar_window - cal_mean) / safe_cal_std).astype(np.float32)
             sample_features = np.concatenate([sample_features, normalized_calendar], axis=1)
 
@@ -530,7 +530,7 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
             epoch_loss += loss.item() * context_batch.size(0)
 
-            #Adding this so I can see how roughly the training will take lol
+            # Report progress and ETA during long training runs.
             overall_batch_index = epoch * batches_per_epoch + batch_index
             if batch_index % PROGRESS_EVERY == 0 or batch_index == batches_per_epoch:
                 elapsed_seconds = time.time() - training_start_time
