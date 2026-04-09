@@ -16,7 +16,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from datapreprocessing import WINDOW_SIZE
+import datapreprocessing as dp
+import fullpredict as fp
+from config import cli_or_config, load_config, resolve_path
 from fullpredict import (
     _split_origin_range,
     compute_metrics,
@@ -33,15 +35,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare forecast models using rolling backtest metrics and presentation-ready plots."
     )
-    parser.add_argument("--mode", choices=["quick", "full"], default="full")
-    parser.add_argument("--eval-split", choices=["all", "val", "test"], default="test")
-    parser.add_argument("--horizon", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=2048)
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file.")
+    parser.add_argument("--mode", choices=["quick", "full"], default=None)
+    parser.add_argument("--eval-split", choices=["all", "val", "test"], default=None)
+    parser.add_argument("--horizon", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--max-origins", type=int, default=None)
     parser.add_argument(
         "--max-products",
         type=int,
-        default=300,
+        default=None,
         help=(
             "Cap number of products for all models for runtime control. "
             "Use a large value for full panel comparison."
@@ -50,12 +53,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         type=str,
-        default="neural,seasonal7,seasonal28,ma7,ma28,ets,autoarima",
+        default=None,
         help="Comma-separated list of models to run.",
     )
-    parser.add_argument("--output-dir", type=str, default="../artifacts")
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default=None)
     return parser.parse_args()
+
+
+def apply_runtime_config(args: argparse.Namespace):
+    config = load_config(args.config)
+
+    window_size = int(cli_or_config(None, config, 'data', 'window_size'))
+    dp.WINDOW_SIZE = window_size
+    fp.WINDOW_SIZE = window_size
+
+    fp.DATA_PATH = resolve_path(config, 'data_path', fp.DATA_PATH)
+    fp.CALENDAR_PATH = resolve_path(config, 'calendar_path', fp.CALENDAR_PATH)
+    fp.METADATA_FILE = resolve_path(config, 'metadata_file', fp.METADATA_FILE)
+    fp.MODEL_FILE = resolve_path(config, 'model_file', fp.MODEL_FILE)
+    fp.CALENDAR_FEATURE_SET = str(cli_or_config(None, config, 'data', 'calendar_feature_set'))
+    fp.MAX_DAY_COLUMNS = int(cli_or_config(None, config, 'data', 'max_day_columns'))
+    fp.MAX_PRODUCTS = int(cli_or_config(None, config, 'data', 'max_products'))
+    fp.TRAIN_SPLIT = float(cli_or_config(None, config, 'training', 'train_split'))
+    fp.VAL_SPLIT = float(cli_or_config(None, config, 'training', 'val_split'))
+
+    mode = str(cli_or_config(args.mode, config, 'inference', 'mode'))
+    eval_split = str(cli_or_config(args.eval_split, config, 'inference', 'eval_split'))
+    horizon = int(cli_or_config(args.horizon, config, 'inference', 'horizon'))
+    batch_size = int(cli_or_config(args.batch_size, config, 'inference', 'batch_size'))
+    max_origins = cli_or_config(args.max_origins, config, 'inference', 'max_origins')
+    max_products = int(cli_or_config(args.max_products, config, 'comparison', 'max_products'))
+    models = str(cli_or_config(args.models, config, 'comparison', 'models'))
+    output_dir = str(cli_or_config(args.output_dir, config, 'comparison', 'output_dir'))
+    device = str(cli_or_config(args.device, config, 'inference', 'device'))
+
+    return mode, eval_split, horizon, batch_size, max_origins, max_products, models, output_dir, device
 
 
 def choose_device(device_arg: str) -> str:
@@ -157,13 +190,13 @@ def run_neural_model(
 
         normalized_calendar_window = None
         if calendar_matrix is not None:
-            raw_calendar_window = calendar_matrix[origin - WINDOW_SIZE : origin, :]
+            raw_calendar_window = calendar_matrix[origin - dp.WINDOW_SIZE : origin, :]
             normalized_calendar_window = normalize_calendar_context(raw_calendar_window)
 
         pred_chunks = []
         for start in range(0, num_products, batch_size):
             end = min(start + batch_size, num_products)
-            raw_context = series[start:end, origin - WINDOW_SIZE : origin]
+            raw_context = series[start:end, origin - dp.WINDOW_SIZE : origin]
             normalized_context, context_mean, context_std = normalize_context_batch(raw_context)
 
             if normalized_calendar_window is not None:
@@ -483,26 +516,37 @@ def run_single_model(
 
 def main() -> None:
     args = parse_args()
+    (
+        mode,
+        eval_split,
+        horizon,
+        batch_size,
+        max_origins,
+        max_products,
+        models,
+        output_dir_raw,
+        device_name,
+    ) = apply_runtime_config(args)
 
-    if args.horizon != 1:
+    if horizon != 1:
         raise ValueError("This script currently supports only --horizon 1.")
 
-    requested_models = parse_model_list(args.models)
-    device = choose_device(args.device)
-    output_dir = Path(args.output_dir)
+    requested_models = parse_model_list(models)
+    device = choose_device(device_name)
+    output_dir = Path(output_dir_raw)
 
     print(f"Device: {device}")
     print(f"Requested models: {requested_models}")
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_series_matrix(mode=mode)
 
-    if args.max_products is not None and args.max_products > 0:
-        capped_products = min(args.max_products, series.shape[0])
+    if max_products is not None and max_products > 0:
+        capped_products = min(max_products, series.shape[0])
         series = series[:capped_products, :]
         product_ids = product_ids[:capped_products]
 
     num_products, num_days = series.shape
-    origins = build_origins(num_days, args.horizon, args.eval_split, args.max_origins)
+    origins = build_origins(num_days, horizon, eval_split, max_origins)
     if not origins:
         raise ValueError("No rolling origins available for requested split and settings.")
 
@@ -532,7 +576,7 @@ def main() -> None:
                 series=series,
                 series_np=series_np,
                 origins=origins,
-                batch_size=args.batch_size,
+                batch_size=batch_size,
                 device=device,
                 calendar_matrix=calendar_matrix,
             )
