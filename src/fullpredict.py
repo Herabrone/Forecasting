@@ -9,27 +9,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
 import torch
 
+import datapreprocessing as dp
+from config import cli_or_config, load_config, resolve_path
 from NN import ConditionalGenerativeModel, createGenerativeGRUNN
-from datapreprocessing import NORMALIZATION_EPSILON, WINDOW_SIZE, load_calendar_features
-from train import (
-	CALENDAR_FEATURE_SET,
-	CALENDAR_PATH,
-	DATA_PATH,
-	MAX_DAY_COLUMNS,
-	MAX_PRODUCTS,
-	METADATA_FILE,
-	MODEL_FILE,
-	TRAIN_SPLIT,
-	VAL_SPLIT,
-)
+from datapreprocessing import NORMALIZATION_EPSILON, load_calendar_features
 
 
 METADATA_COLS = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
+WINDOW_SIZE = dp.WINDOW_SIZE
+DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
+CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
+METADATA_FILE = Path(__file__).resolve().parent.parent / 'artifacts' / 'model_metadata.json'
+MODEL_FILE = Path(__file__).resolve().parent.parent / 'artifacts' / 'model_checkpoint.pt'
+CALENDAR_FEATURE_SET = 'rich'
+MAX_DAY_COLUMNS = 365
+MAX_PRODUCTS = 1000
+TRAIN_SPLIT = 0.6
+VAL_SPLIT = 0.2
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,21 +39,27 @@ def parse_args() -> argparse.Namespace:
 		description="Execute a rolling backtest and report MAE, RMSE, and R² metrics."
 	)
 	parser.add_argument(
+		"--config",
+		type=str,
+		default=None,
+		help="Path to YAML config file.",
+	)
+	parser.add_argument(
 		"--mode",
 		choices=["quick", "full"],
-		default="quick",
+		default=None,
 		help="Evaluation data scope. quick uses fewer products/days; full uses all.",
 	)
 	parser.add_argument(
 		"--horizon",
 		type=int,
-		default=1,
+		default=None,
 		help="Forecast horizon in days. Current implementation supports only 1.",
 	)
 	parser.add_argument(
 		"--batch-size",
 		type=int,
-		default=2048,
+		default=None,
 		help="Number of products per inference batch during each forecast origin.",
 	)
 	parser.add_argument(
@@ -63,7 +71,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--eval-split",
 		choices=["all", "val", "test"],
-		default="test",
+		default=None,
 		help=(
 			"Temporal split used for evaluation. "
 			"'test' uses the final 20%% of the series, "
@@ -72,6 +80,34 @@ def parse_args() -> argparse.Namespace:
 		),
 	)
 	return parser.parse_args()
+
+
+def apply_runtime_config(args: argparse.Namespace):
+	global WINDOW_SIZE, DATA_PATH, CALENDAR_PATH, METADATA_FILE, MODEL_FILE
+	global CALENDAR_FEATURE_SET, MAX_DAY_COLUMNS, MAX_PRODUCTS, TRAIN_SPLIT, VAL_SPLIT
+
+	config = load_config(args.config)
+	WINDOW_SIZE = int(cli_or_config(None, config, 'data', 'window_size'))
+	dp.WINDOW_SIZE = WINDOW_SIZE
+
+	DATA_PATH = resolve_path(config, 'data_path', DATA_PATH)
+	CALENDAR_PATH = resolve_path(config, 'calendar_path', CALENDAR_PATH)
+	METADATA_FILE = resolve_path(config, 'metadata_file', METADATA_FILE)
+	MODEL_FILE = resolve_path(config, 'model_file', MODEL_FILE)
+
+	CALENDAR_FEATURE_SET = str(cli_or_config(None, config, 'data', 'calendar_feature_set'))
+	MAX_DAY_COLUMNS = int(cli_or_config(None, config, 'data', 'max_day_columns'))
+	MAX_PRODUCTS = int(cli_or_config(None, config, 'data', 'max_products'))
+	TRAIN_SPLIT = float(cli_or_config(None, config, 'training', 'train_split'))
+	VAL_SPLIT = float(cli_or_config(None, config, 'training', 'val_split'))
+
+	mode = cli_or_config(args.mode, config, 'inference', 'mode')
+	horizon = int(cli_or_config(args.horizon, config, 'inference', 'horizon'))
+	batch_size = int(cli_or_config(args.batch_size, config, 'inference', 'batch_size'))
+	max_origins = cli_or_config(args.max_origins, config, 'inference', 'max_origins')
+	eval_split = cli_or_config(args.eval_split, config, 'inference', 'eval_split')
+
+	return str(mode), horizon, batch_size, max_origins, str(eval_split)
 
 
 def load_model(checkpoint_path=MODEL_FILE, device: str = "cpu") -> ConditionalGenerativeModel:
@@ -362,6 +398,7 @@ def print_summary(overall: Dict[str, float], per_origin: pd.DataFrame, mode: str
 
 def main() -> None:
 	args = parse_args()
+	mode, horizon, batch_size, max_origins, eval_split = apply_runtime_config(args)
 	device = "cuda" if torch.cuda.is_available() else "cpu"
 
 	print(f"Loading model from: {MODEL_FILE}")
@@ -369,26 +406,26 @@ def main() -> None:
 
 	model = load_model(device=device)
 	model_data_size = model.net.gru.input_size
-	product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+	product_ids, day_cols, series = load_series_matrix(mode=mode)
 	calendar_matrix = load_calendar_matrix(day_cols=day_cols, data_size=model_data_size)
 	print(f"Products: {len(product_ids)}")
 	print(f"Day columns in evaluation: {series.shape[1]}")
 	print(f"Model input size: {model_data_size}")
 
-	print(f"Eval split: {args.eval_split}")
+	print(f"Eval split: {eval_split}")
 
 	overall, per_origin, _all_true, _all_pred = run_rolling_backtest(
 		model=model,
 		series=series,
 		calendar_matrix=calendar_matrix,
-		horizon=args.horizon,
+		horizon=horizon,
 		device=device,
-		batch_size=args.batch_size,
-		max_origins=args.max_origins,
-		eval_split=args.eval_split,
+		batch_size=batch_size,
+		max_origins=max_origins,
+		eval_split=eval_split,
 	)
 
-	print_summary(overall=overall, per_origin=per_origin, mode=args.mode, horizon=args.horizon, eval_split=args.eval_split)
+	print_summary(overall=overall, per_origin=per_origin, mode=mode, horizon=horizon, eval_split=eval_split)
 
 
 if __name__ == "__main__":
