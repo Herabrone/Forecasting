@@ -31,6 +31,9 @@ from fullpredict import (
 )
 
 
+NEURAL_PROGRESS_INTERVAL = 25
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare forecast models using rolling backtest metrics and presentation-ready plots."
@@ -104,9 +107,6 @@ def parse_model_list(raw_models: str) -> List[str]:
         "seasonal28",
         "ma7",
         "ma28",
-        "ets",
-        "autoarima",
-        "sarima",
     }
     requested = [name.strip().lower() for name in raw_models.split(",") if name.strip()]
     unknown = [name for name in requested if name not in valid]
@@ -211,7 +211,7 @@ def run_neural_model(
         pred_values = torch.cat(pred_chunks, dim=0)
         pred_matrix[:, origin_number - 1] = pred_values.cpu().numpy()
 
-        if origin_number % 25 == 0 or origin_number == len(origins):
+        if origin_number % NEURAL_PROGRESS_INTERVAL == 0 or origin_number == len(origins):
             print(f"[neural] processed origin {origin_number}/{len(origins)}")
 
     return true_matrix, pred_matrix
@@ -239,164 +239,13 @@ def run_vector_baseline(series_np: np.ndarray, origins: List[int], model_key: st
     return true_matrix, pred_matrix
 
 
-def run_ets(series_np: np.ndarray, origins: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-    try:
-        from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    except Exception as exc:
-        raise RuntimeError("ETS requires statsmodels. Install with: pip install statsmodels") from exc
-
-    warnings.filterwarnings("ignore")
-
-    num_products = series_np.shape[0]
-    true_matrix = np.zeros((num_products, len(origins)), dtype=np.float32)
-    pred_matrix = np.full((num_products, len(origins)), np.nan, dtype=np.float32)
-
-    first_origin = origins[0]
-
-    for product_idx in range(num_products):
-        y = series_np[product_idx, :]
-        true_matrix[product_idx, :] = y[origins]
-
-        train_history = y[:first_origin]
-        if len(train_history) < 14:
-            continue
-
-        try:
-            fit = ExponentialSmoothing(
-                train_history,
-                trend="add",
-                seasonal="add",
-                seasonal_periods=7,
-                initialization_method="estimated",
-            ).fit(optimized=True, use_brute=False)
-        except Exception:
-            continue
-
-        for origin_idx, origin in enumerate(origins):
-            try:
-                pred_matrix[product_idx, origin_idx] = float(fit.forecast(1)[0])
-            except Exception:
-                pred_matrix[product_idx, origin_idx] = np.nan
-
-            observation = float(y[origin])
-            try:
-                fit = fit.append([observation], refit=False)
-            except Exception:
-                break
-
-        if (product_idx + 1) % 25 == 0 or (product_idx + 1) == num_products:
-            print(f"[ets] processed product {product_idx + 1}/{num_products}")
-
-    return true_matrix, pred_matrix
 
 
-def run_autoarima(series_np: np.ndarray, origins: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-    try:
-        from pmdarima import auto_arima
-    except Exception as exc:
-        raise RuntimeError("AutoARIMA requires pmdarima. Install with: pip install pmdarima") from exc
-
-    warnings.filterwarnings("ignore")
-
-    num_products = series_np.shape[0]
-    true_matrix = np.zeros((num_products, len(origins)), dtype=np.float32)
-    pred_matrix = np.full((num_products, len(origins)), np.nan, dtype=np.float32)
-
-    first_origin = origins[0]
-
-    for product_idx in range(num_products):
-        y = series_np[product_idx, :]
-        true_matrix[product_idx, :] = y[origins]
-
-        train_history = y[:first_origin]
-        if len(train_history) < 21:
-            continue
-
-        try:
-            model = auto_arima(
-                train_history,
-                seasonal=True,
-                m=7,
-                stepwise=True,
-                suppress_warnings=True,
-                error_action="ignore",
-                max_p=3,
-                max_q=3,
-                max_P=2,
-                max_Q=2,
-                d=None,
-                D=None,
-            )
-        except Exception:
-            continue
-
-        for origin_idx, origin in enumerate(origins):
-            try:
-                pred_matrix[product_idx, origin_idx] = float(model.predict(n_periods=1)[0])
-            except Exception:
-                pred_matrix[product_idx, origin_idx] = np.nan
-
-            observation = float(y[origin])
-            try:
-                model.update(observation)
-            except Exception:
-                break
-
-        if (product_idx + 1) % 10 == 0 or (product_idx + 1) == num_products:
-            print(f"[autoarima] processed product {product_idx + 1}/{num_products}")
-
-    return true_matrix, pred_matrix
 
 
-def run_sarima(series_np: np.ndarray, origins: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-    try:
-        from statsmodels.tsa.statespace.sarimax import SARIMAX
-    except Exception as exc:
-        raise RuntimeError("SARIMA requires statsmodels. Install with: pip install statsmodels") from exc
 
-    warnings.filterwarnings("ignore")
 
-    num_products = series_np.shape[0]
-    true_matrix = np.zeros((num_products, len(origins)), dtype=np.float32)
-    pred_matrix = np.full((num_products, len(origins)), np.nan, dtype=np.float32)
 
-    first_origin = origins[0]
-
-    for product_idx in range(num_products):
-        y = series_np[product_idx, :]
-        true_matrix[product_idx, :] = y[origins]
-
-        train_history = y[:first_origin]
-        if len(train_history) < 21:
-            continue
-
-        try:
-            fit = SARIMAX(
-                train_history,
-                order=(1, 1, 1),
-                seasonal_order=(1, 1, 1, 7),
-                enforce_stationarity=False,
-                enforce_invertibility=False,
-            ).fit(disp=False)
-        except Exception:
-            continue
-
-        for origin_idx, origin in enumerate(origins):
-            try:
-                pred_matrix[product_idx, origin_idx] = float(fit.forecast(1)[0])
-            except Exception:
-                pred_matrix[product_idx, origin_idx] = np.nan
-
-            observation = float(y[origin])
-            try:
-                fit = fit.append([observation], refit=False)
-            except Exception:
-                break
-
-        if (product_idx + 1) % 10 == 0 or (product_idx + 1) == num_products:
-            print(f"[sarima] processed product {product_idx + 1}/{num_products}")
-
-    return true_matrix, pred_matrix
 
 
 def weighted_r2(per_origin: pd.DataFrame) -> float:
@@ -487,9 +336,6 @@ def run_single_model(
         "seasonal28": "Seasonal-28",
         "ma7": "MovingAvg-7",
         "ma28": "MovingAvg-28",
-        "ets": "ETS (Holt-Winters)",
-        "autoarima": "AutoARIMA",
-        "sarima": "SARIMA(1,1,1)x(1,1,1,7)",
     }
 
     if model_key == "neural":
@@ -502,12 +348,6 @@ def run_single_model(
         )
     elif model_key in {"seasonal7", "seasonal28", "ma7", "ma28"}:
         true_matrix, pred_matrix = run_vector_baseline(series_np, origins, model_key)
-    elif model_key == "ets":
-        true_matrix, pred_matrix = run_ets(series_np, origins)
-    elif model_key == "autoarima":
-        true_matrix, pred_matrix = run_autoarima(series_np, origins)
-    elif model_key == "sarima":
-        true_matrix, pred_matrix = run_sarima(series_np, origins)
     else:
         raise ValueError(f"Unknown model key: {model_key}")
 
