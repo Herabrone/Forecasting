@@ -32,6 +32,8 @@ MAX_DAY_COLUMNS = 365
 MAX_PRODUCTS = 1000
 TRAIN_SPLIT = 0.6
 VAL_SPLIT = 0.2
+PROGRESS_LOG_INTERVAL = 25
+LOW_VARIANCE_SST_THRESHOLD = 1e-6
 
 
 def parse_args() -> argparse.Namespace:
@@ -352,7 +354,7 @@ def run_rolling_backtest(
 		all_true_batches.append(true_values)
 		all_pred_batches.append(pred_values)
 
-		if origin_idx % 25 == 0 or origin_idx == total_origins:
+		if origin_idx % PROGRESS_LOG_INTERVAL == 0 or origin_idx == total_origins:
 			print(f"Processed rolling origin {origin_idx}/{total_origins}")
 
 	all_true = torch.cat(all_true_batches, dim=0)
@@ -391,9 +393,9 @@ def print_summary(overall: Dict[str, float], per_origin: pd.DataFrame, mode: str
 		weighted_r2 = 1.0 - (per_origin["sse"].sum() / sst_total)
 		print(f"R2 SST-weighted:    {weighted_r2:.4f}")
 
-	low_variance_origins = int((per_origin["sst"] < 1e-6).sum())
+	low_variance_origins = int((per_origin["sst"] < LOW_VARIANCE_SST_THRESHOLD).sum())
 	if low_variance_origins > 0:
-		print(f"Low-variance origins (sst < 1e-6): {low_variance_origins}")
+		print(f"Low-variance origins (sst < {LOW_VARIANCE_SST_THRESHOLD}): {low_variance_origins}")
 
 
 def main() -> None:
