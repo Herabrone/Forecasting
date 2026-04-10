@@ -51,7 +51,7 @@ from train import TimeSeriesWindowDataset, compute_loss
 from fullpredict import (
     _split_origin_range,
     compute_metrics,
-    load_series_matrix,
+    load_product_series,
     model_predict_mean,
     normalize_calendar_context,
     normalize_context_batch,
@@ -386,7 +386,7 @@ def run_feature_zero(args: argparse.Namespace) -> None:
     model.eval()
     data_size = model.net.gru.input_size
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     calendar_names = metadata.get("calendar_feature_names", [])
 
@@ -607,7 +607,7 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
     model = _finetune(model, train_loader, val_loader, args.finetune_epochs, loss_name, device, lr=args.lr)
 
     # Compare model performance against the historical rolling window sequence.
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     metrics = _rolling_eval(
         model, series, calendar_matrix, device,
@@ -639,7 +639,7 @@ def run_loss_swap(args: argparse.Namespace) -> None:
     train_loader, val_loader = _get_finetune_loaders(args, data_size)
     model = _finetune(model, train_loader, val_loader, args.finetune_epochs, new_loss, device, lr=args.lr)
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     metrics = _rolling_eval(
         model, series, calendar_matrix, device,
@@ -667,7 +667,7 @@ def run_ensemble_size(args: argparse.Namespace) -> None:
     model.eval()
     data_size = model.net.gru.input_size
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
 
     sizes = args.num_generations
