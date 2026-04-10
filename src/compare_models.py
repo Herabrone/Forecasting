@@ -1,8 +1,9 @@
 """Compare a neural forecast model against classical time-series baselines.
 
 This script runs a one-day-ahead rolling backtest on sales_train_validation.csv
-using the same origin split strategy as fullpredict.py, then saves a leaderboard
-CSV and visual plots for model comparison.
+using the same origin split strategy as fullpredict.py. It evaluates multiple
+baseline models alongside the neural network to produce a leaderboard. The results
+can then be plotted for visual comparison.
 """
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ NEURAL_PROGRESS_INTERVAL = 25
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the comparison script.
+    
+    Returns:
+        The parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Compare forecast models using rolling backtest metrics and presentation-ready plots."
     )
@@ -65,6 +71,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def apply_runtime_config(args: argparse.Namespace):
+    """Apply combinations of CLI arguments and YAML configuration to global constants.
+    
+    This function overrides default configuration in the `dp` and `fp` modules 
+    according to the specified priority (CLI overrides YAML, YAML overrides default).
+    
+    Args:
+        args: Parsed command-line arguments.
+        
+    Returns:
+        A tuple containing runtime settings:
+        (mode, eval_split, horizon, batch_size, max_origins, max_products, models, output_dir, device).
+    """
     config = load_config(args.config)
 
     window_size = int(cli_or_config(None, config, 'data', 'window_size'))
@@ -124,6 +142,19 @@ def build_origins(num_days: int, horizon: int, eval_split: str, max_origins: int
 
 
 def masked_metrics(y_true_values: np.ndarray, y_pred_values: np.ndarray) -> Dict[str, float]:
+    """Calculate regression metrics for finite predicted and true values.
+    
+    This function excludes any `NaN` values resulting from unforecastable points
+    and returns comprehensive accuracy data.
+    
+    Args:
+        y_true_values: The ground-truth numeric values.
+        y_pred_values: The model-predicted numeric values.
+        
+    Returns:
+        A dictionary containing standard metrics (mae, rmse, r2, sse, sst) 
+        plus the number of valid points evaluated (n).
+    """
     valid_mask = np.isfinite(y_true_values) & np.isfinite(y_pred_values)
     valid_count = int(valid_mask.sum())
     if valid_count == 0:
@@ -148,6 +179,20 @@ def compute_overall_and_origin_metrics(
     pred_matrix: np.ndarray,
     origins: List[int],
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
+    """Calculate accuracy metrics both across all origins and for each origin individually.
+    
+    This allows a unified review of the predictions along with drill-down
+    accuracy metrics by day.
+    
+    Args:
+        true_matrix: True target values matching the prediction outputs.
+        pred_matrix: Forecasted values matched against the targets.
+        origins: Origin indices used for the forecasts.
+        
+    Returns:
+        A tuple of (overall_metrics, per_origin_dataframe). The dataframe 
+        contains row-level details indexed via the input `origins`.
+    """
     overall = masked_metrics(true_matrix.reshape(-1), pred_matrix.reshape(-1))
 
     rows = []
@@ -254,6 +299,30 @@ def weighted_r2(per_origin: pd.DataFrame) -> float:
         return float("nan")
     total_sse = float(per_origin["sse"].sum(skipna=True))
     return 1.0 - (total_sse / total_sst)
+
+
+def save_comparison_results(leaderboard_df: pd.DataFrame, per_origin_df: pd.DataFrame, output_dir: Path) -> Tuple[Path, Path]:
+    """Save the final ranking and per-origin metrics to disk.
+    
+    This function serializes the analysis tables so they can be reviewed outside
+    of memory.
+    
+    Args:
+        leaderboard_df: The aggregated metrics ranked across models.
+        per_origin_df: Detailed rows for each prediction origin.
+        output_dir: Directory where the target CSV files will be placed.
+        
+    Returns:
+        A tuple of paths pointing to the leaderboard and per-origin CSVs respectively.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    leaderboard_csv = output_dir / "compare_models_metrics.csv"
+    per_origin_csv = output_dir / "compare_models_per_origin.csv"
+
+    leaderboard_df.to_csv(leaderboard_csv, index=False)
+    per_origin_df.to_csv(per_origin_csv, index=False)
+    
+    return leaderboard_csv, per_origin_csv
 
 
 def plot_outputs(leaderboard_df: pd.DataFrame, per_origin_df: pd.DataFrame, output_dir: Path) -> None:
@@ -457,12 +526,7 @@ def main() -> None:
     leaderboard_df = pd.DataFrame(leaderboard_rows).sort_values("rmse", ascending=True)
     per_origin_df = pd.concat(per_origin_frames, ignore_index=True)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    leaderboard_csv = output_dir / "compare_models_metrics.csv"
-    per_origin_csv = output_dir / "compare_models_per_origin.csv"
-
-    leaderboard_df.to_csv(leaderboard_csv, index=False)
-    per_origin_df.to_csv(per_origin_csv, index=False)
+    leaderboard_csv, per_origin_csv = save_comparison_results(leaderboard_df, per_origin_df, output_dir)
 
     print("-" * 72)
     print("Leaderboard (sorted by RMSE):")
