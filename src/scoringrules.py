@@ -1,15 +1,30 @@
-import torch
+"""
+Scoring rules for predictive distributions.
 
-# I looked into some other scoring rules but I think they may not be applicable? idk
+This module implements energy, kernel, and combined energy-kernel scoring rules
+for evaluating probabilistic forecasts.
+"""
+
+import torch
 
 BETA = 1 # For energym the paper defines that beta is in (0,2) and uses 1 in its experiments
 GAMMA = 1 # For kernel, needs to be defined by us
 ALPHA_ENERGY = 1.0 # Weight for energy-kernel
 ALPHA_KERNEL = 1.0 # Weight for energy-kernel
 
-# Implementation of C.1.1
-# P is the distribution, y is the goal value
 def energy(P, y):
+    """
+    Compute the energy score.
+
+    Implements the energy score formula (C.1.1).
+
+    Args:
+        P (torch.Tensor): The predictive distribution.
+        y (torch.Tensor): The goal value observation.
+
+    Returns:
+        torch.Tensor: The computed energy score.
+    """
     single_input = (P.dim() == 1)
     if single_input:
         P = P.unsqueeze(0)
@@ -38,9 +53,19 @@ def energy(P, y):
 
     return score.mean()
 
-# Implementation of C.1.2
-# In B.2.2 the Gaussian Kernel k(x,y) is defined
 def kernel(P, y):
+    """
+    Compute the kernel score.
+
+    Implements the kernel score formula (C.1.2) using a Gaussian Kernel (B.2.2).
+
+    Args:
+        P (torch.Tensor): The predictive distribution.
+        y (torch.Tensor): The goal value observation.
+
+    Returns:
+        torch.Tensor: The computed kernel score.
+    """
     single_input = (P.dim() == 1)
     if single_input:
         P = P.unsqueeze(0)
@@ -71,8 +96,19 @@ def kernel(P, y):
 
     return score.mean()
 
-# Weighted sum of energy and kernel, by lemma 4
 def energy_kernel(P, y):
+    """
+    Compute the weighted sum of energy and kernel scores.
+
+    Based on Lemma 4.
+
+    Args:
+        P (torch.Tensor): The predictive distribution.
+        y (torch.Tensor): The goal value observation.
+
+    Returns:
+        torch.Tensor: The computed combined energy-kernel score.
+    """
     return (ALPHA_ENERGY * energy(P, y)) + (ALPHA_KERNEL * kernel(P, y))
 
 if __name__ == '__main__':
