@@ -1,3 +1,14 @@
+"""Train a probabilistic neural forecaster on M5 daily sales data.
+
+This module handles:
+- loading sales and optional calendar covariates,
+- creating chronological train/validation/test window splits,
+- fitting a GRU-based conditional generative model,
+- saving model artifacts and training metadata.
+
+Configuration is loaded from config.yaml and can be overridden per run with CLI flags.
+"""
+
 import argparse
 import sys
 import os
@@ -40,7 +51,7 @@ BATCH_SIZE = 81920  # Samples per optimizer step.
                    # Larger batches usually increase throughput on GPU but require more VRAM.
                    # If you hit CUDA OOM, lower this first (for example: 4096, then 2048).
 
-EPOCHS = 00  # Full passes over the selected training subset.
+EPOCHS = 40  # Full passes over the selected training subset.
             # More epochs can improve fit but increase runtime linearly.
 
 # Temporal split ratios for train/val/test. The code will compute actual window boundaries based on the total number of windows.
@@ -69,26 +80,31 @@ LOSS_PLOT_FILE = ARTIFACTS_DIR / 'loss_vs_epoch.png'
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Train the probabilistic forecasting model.')
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
-    parser.add_argument('--mode', choices=['quick', 'full'], default=None, help='Run scope override.')
-    parser.add_argument('--loss-name', choices=['ensemble_nll', 'energy', 'kernel', 'energy_kernel'], default=None)
-    parser.add_argument('--epochs', type=int, default=None)
-    parser.add_argument('--batch-size', type=int, default=None)
-    parser.add_argument('--learning-rate', type=float, default=None)
-    parser.add_argument('--progress-every', type=int, default=None)
-    parser.add_argument('--max-products', type=int, default=None)
-    parser.add_argument('--max-day-columns', type=int, default=None)
-    parser.add_argument('--window-size', type=int, default=None)
-    parser.add_argument('--calendar-feature-set', choices=['minimal', 'rich'], default=None)
-    parser.add_argument('--train-split', type=float, default=None)
-    parser.add_argument('--val-split', type=float, default=None)
-    parser.add_argument('--test-split', type=float, default=None)
-    parser.add_argument('--num-workers', type=int, default=None)
-    parser.add_argument('--prefetch-factor', type=int, default=None)
-    parser.add_argument('--gru-hidden-size', type=int, default=None)
-    parser.add_argument('--noise-size', type=int, default=None)
-    parser.add_argument('--output-size', type=int, default=None)
-    parser.add_argument('--num-generations', type=int, default=None)
-    parser.add_argument('--fc-hidden-sizes', type=str, default=None, help='Comma-separated FC hidden sizes.')
+    parser.add_argument('--mode', choices=['quick', 'full'], default=None, help='Data scope override: quick subset or full dataset.')
+    parser.add_argument(
+        '--loss-name',
+        choices=['ensemble_nll', 'energy', 'kernel', 'energy_kernel'],
+        default=None,
+        help='Training objective override.',
+    )
+    parser.add_argument('--epochs', type=int, default=None, help='Number of training epochs.')
+    parser.add_argument('--batch-size', type=int, default=None, help='Batch size for train/val/test data loaders.')
+    parser.add_argument('--learning-rate', type=float, default=None, help='Optimizer learning rate.')
+    parser.add_argument('--progress-every', type=int, default=None, help='Progress print interval in train batches.')
+    parser.add_argument('--max-products', type=int, default=None, help='Limit products when using quick mode.')
+    parser.add_argument('--max-day-columns', type=int, default=None, help='Limit number of most recent day columns in quick mode.')
+    parser.add_argument('--window-size', type=int, default=None, help='Context window length in days.')
+    parser.add_argument('--calendar-feature-set', choices=['minimal', 'rich'], default=None, help='Calendar feature preset.')
+    parser.add_argument('--train-split', type=float, default=None, help='Train split ratio.')
+    parser.add_argument('--val-split', type=float, default=None, help='Validation split ratio.')
+    parser.add_argument('--test-split', type=float, default=None, help='Test split ratio.')
+    parser.add_argument('--num-workers', type=int, default=None, help='DataLoader worker count.')
+    parser.add_argument('--prefetch-factor', type=int, default=None, help='DataLoader prefetch factor when workers > 0.')
+    parser.add_argument('--gru-hidden-size', type=int, default=None, help='GRU hidden size.')
+    parser.add_argument('--noise-size', type=int, default=None, help='Auxiliary noise dimension for generation.')
+    parser.add_argument('--output-size', type=int, default=None, help='Output dimension per forecast target.')
+    parser.add_argument('--num-generations', type=int, default=None, help='Number of generated samples per forward call.')
+    parser.add_argument('--fc-hidden-sizes', type=str, default=None, help='Comma-separated FC hidden sizes, e.g. 128,64,32.')
 
     calendar_group = parser.add_mutually_exclusive_group()
     calendar_group.add_argument('--use-calendar-features', dest='use_calendar_features', action='store_true')
@@ -99,6 +115,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _parse_fc_hidden_sizes(raw_value):
+    """Convert config/CLI FC layer spec into a list of integers."""
+
     if raw_value is None:
         return None
     if isinstance(raw_value, list):
@@ -107,6 +125,8 @@ def _parse_fc_hidden_sizes(raw_value):
 
 
 def apply_runtime_config(args: argparse.Namespace) -> None:
+    """Resolve runtime settings by merging CLI overrides with config defaults."""
+
     global WINDOW_SIZE
     global DATA_PATH, CALENDAR_PATH, ARTIFACTS_DIR, MODEL_FILE, METADATA_FILE, LOSS_PLOT_FILE
     global USE_CALENDAR_FEATURES, CALENDAR_FEATURE_SET, LOSS_NAME
@@ -163,6 +183,8 @@ def apply_runtime_config(args: argparse.Namespace) -> None:
 
 
 def _day_sort_key(day_col_name):
+    """Sort M5 day columns numerically (d_1, d_2, ..., d_n)."""
+
     return int(day_col_name.split('_', maxsplit=1)[1])
 
 
@@ -461,8 +483,11 @@ def evaluate_model(model, data_loader, device, loss_name):
     return total_loss / total_count
 
 
-def train_model(train_loader, val_loader, test_loader, data_size, calendar_feature_names, split_info, loss_name=LOSS_NAME):
-    """Create NN model and minimal training setup."""
+def train_model(train_loader, val_loader, test_loader, data_size, calendar_feature_names, split_info, loss_name=None):
+    """Create and train the model; uses runtime LOSS_NAME when no loss_name is provided."""
+    if loss_name is None:
+        loss_name = LOSS_NAME
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
