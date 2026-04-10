@@ -36,19 +36,18 @@ WINDOW_SIZE = dp.WINDOW_SIZE
 
 DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
 CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
-USE_CALENDAR_FEATURES = True  # Toggle calendar covariates on/off.
-CALENDAR_FEATURE_SET = 'rich'  # Supported values: 'minimal' or 'rich'.
-LOSS_NAME = 'energy'  # Training objective to optimize. 'ensemble_nll' is usually the fastest and most stable.
-                             # Other options ('energy', 'kernel', 'energy_kernel') are valid but can train slower.
+USE_CALENDAR_FEATURES = True  # Controls inclusion of external calendar covariates.
+CALENDAR_FEATURE_SET = 'rich'  # Determines covariate dimensionality ('minimal' or 'rich').
+LOSS_NAME = 'energy'  # Model optimization objective ('ensemble_nll', 'energy', 'kernel', 'energy_kernel').
+                             # Advanced objectives like 'energy' penalize spread but increase runtime.
 
-QUICK_RUN = False  # If True, train on a subset for faster iteration. If False, use all products and all day columns.
+QUICK_RUN = False  # Truncates dataset dimensions to accelerate debug iterations.
 
-MAX_PRODUCTS = 1000  # Number of product time series to keep when QUICK_RUN=True.
-MAX_DAY_COLUMNS = 365  # Number of most recent day columns to keep when QUICK_RUN=True.
-                       # Must be >= WINDOW_SIZE + 1 to form at least one input-target pair.
+MAX_PRODUCTS = 1000  # Caps product time series in quick runs to limit memory.
+MAX_DAY_COLUMNS = 365  # Truncates history window in quick runs.
+                       # Requires at least WINDOW_SIZE + 1 days for minimum sample framing.
 
-BATCH_SIZE = 81920  # Samples per optimizer step.
-                   # Larger batches usually increase throughput on GPU but require more VRAM.
+BATCH_SIZE = 81920  # Tradeoff between VRAM footprint and GPU throughput.
                    # If you hit CUDA OOM, lower this first (for example: 4096, then 2048).
 
 EPOCHS = 40  # Full passes over the selected training subset.
@@ -484,7 +483,20 @@ def evaluate_model(model, data_loader, device, loss_name):
 
 
 def train_model(train_loader, val_loader, test_loader, data_size, calendar_feature_names, split_info, loss_name=None):
-    """Create and train the model; uses runtime LOSS_NAME when no loss_name is provided."""
+    """Create and train the model.
+
+    Args:
+        train_loader: DataLoader providing the training batches.
+        val_loader: DataLoader providing the validation batches.
+        test_loader: DataLoader providing the test batches.
+        data_size: Total number of features per timestep.
+        calendar_feature_names: List of names for included calendar covariates.
+        split_info: Dictionary containing temporal window boundaries.
+        loss_name: Optimization objective identifier.
+
+    Returns:
+        The trained ConditionalGenerativeModel.
+    """
     if loss_name is None:
         loss_name = LOSS_NAME
 
@@ -555,7 +567,7 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
             epoch_loss += loss.item() * context_batch.size(0)
 
-            # Report progress and ETA during long training runs.
+            # Report progress and ETA during training runs.
             overall_batch_index = epoch * batches_per_epoch + batch_index
             if batch_index % PROGRESS_EVERY == 0 or batch_index == batches_per_epoch:
                 elapsed_seconds = time.time() - training_start_time
