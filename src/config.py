@@ -1,3 +1,8 @@
+"""Configuration management utilities.
+
+Handles parsing, merging, and retrieving values from YAML configuration files.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,6 +21,15 @@ DEFAULT_CONFIG_PATH = ROOT_DIR / "config.yaml"
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge two dictionaries.
+
+    Args:
+        base: The base dictionary.
+        override: The dictionary containing overrides to apply.
+
+    Returns:
+        A new dictionary containing the merged result.
+    """
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -26,6 +40,18 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 
 def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
+    """Load configuration from a YAML file and merge with defaults.
+
+    Args:
+        config_path: Path to the configuration file.
+
+    Returns:
+        The parsed and merged configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the specified configuration file does not exist.
+        ValueError: If the parsed configuration root is not a mapping.
+    """
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
     if not path.is_absolute():
         path = ROOT_DIR / path
@@ -50,6 +76,16 @@ def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
 
 
 def get_config_value(config: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Retrieve a nested value from the configuration dictionary.
+
+    Args:
+        config: The configuration dictionary.
+        *keys: Arguments representing the nested path of keys.
+        default: The value to return if the path is not found.
+
+    Returns:
+        The resolved value or the default.
+    """
     cursor: Any = config
     for key in keys:
         if not isinstance(cursor, dict) or key not in cursor:
@@ -59,6 +95,16 @@ def get_config_value(config: Dict[str, Any], *keys: str, default: Any = None) ->
 
 
 def resolve_path(config: Dict[str, Any], key: str, fallback: Path) -> Path:
+    """Resolve a path from the 'paths' section of the configuration.
+
+    Args:
+        config: The configuration dictionary.
+        key: The key within the 'paths' section.
+        fallback: The default path to use if the key is not found.
+
+    Returns:
+        An absolute path object.
+    """
     raw_value = get_config_value(config, "paths", key)
     if raw_value is None:
         return fallback
@@ -69,6 +115,17 @@ def resolve_path(config: Dict[str, Any], key: str, fallback: Path) -> Path:
 
 
 def cli_or_config(cli_value: Any, config: Dict[str, Any], section: str, key: str) -> Any:
+    """Select a value from the CLI override or the configuration file.
+
+    Args:
+        cli_value: The value provided via command-line arguments.
+        config: The configuration dictionary.
+        section: The section key in the configuration.
+        key: The specific key within the section.
+
+    Returns:
+        The CLI value if present, otherwise the configuration value.
+    """
     if cli_value is not None:
         return cli_value
     return get_config_value(config, section, key)
