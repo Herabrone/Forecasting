@@ -18,13 +18,13 @@ Examples:
   # See how much removing event features hurts (no retraining):
   python ablation.py feature_zero --zero-groups event
 
-  # Restrict GRU layers while adapting forward fully-connected networks mapping.
+    # Freeze GRU layers and fine-tune FC layers.
   python ablation.py freeze_finetune --freeze gru --finetune-epochs 3
 
   # Fine-tune with kernel loss for 2 epochs:
   python ablation.py loss_swap --loss kernel --finetune-epochs 2
 
-  # Project metrics under expanded ensemble simulation variations.
+    # Evaluate metrics with different ensemble sizes.
   python ablation.py ensemble_size --num-generations 50
 """
 
@@ -75,12 +75,12 @@ PREFETCH_FACTOR = 2
 
 
 def _create_data_loader(dataset, batch_size: int, shuffle: bool):
-    """Instantiates a highly parallelized native PyTorch data loader for the dataset.
+    """Create a PyTorch DataLoader for the provided dataset.
 
     Args:
         dataset: The collection of time series blocks to iterate over.
         batch_size: Fixed number of elements to process concurrently.
-        shuffle: Toggles randomized sampling of elements.
+        shuffle: Whether to iterate samples in randomized order.
 
     Returns:
         The initialized DataLoader object.
@@ -96,10 +96,10 @@ def _create_data_loader(dataset, batch_size: int, shuffle: bool):
 
 
 def apply_runtime_config(config_path: str | None):
-    """Reconciles internal parameter globals using cli flags or YAML configurations.
+    """Update runtime globals from YAML configuration.
 
     Args:
-        config_path: Pathline path directing to project configurations.
+        config_path: Path to the configuration file.
 
     Returns:
         None. Modifies global limits internally before program execution begins.
@@ -520,19 +520,19 @@ def _finetune(
     device: str,
     lr: float = 5e-4,
 ) -> ConditionalGenerativeModel:
-    """Updates active parameters through back-propagation and partial training length.
+    """Fine-tune trainable model parameters for a fixed number of epochs.
 
     Args:
-        model: Torch sequence estimation structure containing active gradients.
-        train_loader: Sequence elements generator across subset.
-        val_loader: Holdout chunk element loader.
-        epochs: Repetition times around whole partial dataset.
-        loss_name: Cost definition string.
-        device: Current computing medium label.
-        lr: Scaled descent rate parameter. Default is 5e-4.
+        model: Forecast model with some parameters marked as trainable.
+        train_loader: Training data loader.
+        val_loader: Validation data loader.
+        epochs: Number of fine-tuning epochs.
+        loss_name: Loss function name.
+        device: Device identifier (cpu or cuda).
+        lr: Optimizer learning rate. Default is 5e-4.
 
     Returns:
-        Conditioned network object loaded against minimized error point.
+        Model with best validation weights restored.
     """
     trainable = [p for p in model.parameters() if p.requires_grad]
     if not trainable:
@@ -592,7 +592,7 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
     data_size = checkpoint.get("data_size", 1)
     loss_name = checkpoint.get("loss_name", "ensemble_nll")
 
-    # Apply targeted parameter immobilization based on runtime configuration.
+    # Freeze selected parameters before fine-tuning.
     if args.freeze == "gru":
         _freeze_params(model.net.gru)
         label = "GRU frozen, FC fine-tuned"
@@ -741,13 +741,13 @@ def build_parser() -> argparse.ArgumentParser:
     ff.add_argument("--finetune-epochs", type=int, default=None)
     ff.add_argument("--lr", type=float, default=None)
 
-    # Alternate distribution criteria evaluation.
+    # loss_swap configuration.
     ls = sub.add_parser("loss_swap", help="Fine-tune with a different loss function.")
     ls.add_argument("--loss", required=True, choices=["ensemble_nll", "energy", "kernel", "energy_kernel"])
     ls.add_argument("--finetune-epochs", type=int, default=None)
     ls.add_argument("--lr", type=float, default=None)
 
-    # Generative count manipulation test setup.
+    # ensemble_size configuration.
     es = sub.add_parser("ensemble_size", help="Evaluate with different ensemble draw counts.")
     es.add_argument(
         "--num-generations", type=int, nargs="+", default=None,

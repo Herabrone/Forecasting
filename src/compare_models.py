@@ -25,7 +25,7 @@ from fullpredict import (
     compute_metrics,
     load_calendar_matrix,
     load_model,
-    load_series_matrix,
+    load_product_series,
     model_predict_mean,
     normalize_calendar_context,
     normalize_context_batch,
@@ -447,7 +447,7 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Requested models: {requested_models}")
 
-    product_ids, day_cols, series = load_series_matrix(mode=mode)
+    product_ids, day_cols, series = load_product_series(mode=mode)
 
     if max_products is not None and max_products > 0:
         capped_products = min(max_products, series.shape[0])
