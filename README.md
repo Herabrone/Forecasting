@@ -12,9 +12,11 @@ Historical sales data matrix with product × day columns.
 ### 2. `calendar.csv`
 Calendar metadata providing temporal context for feature engineering.
 
-Both these datasets are available on kaggle at https://www.kaggle.com/datasets/kyakovlev/m5-aux-models
+Both these datasets are available on kaggle at https://www.kaggle.com/competitions/m5-forecasting-accuracy
 
 Used for: optional calendar covariate features during training and evaluation (see `--calendar-feature-set`).
+
+A verified Kaggle account is required to download these files. Otherwise, this data is available to use for academic purposes.
 
 ---
 
