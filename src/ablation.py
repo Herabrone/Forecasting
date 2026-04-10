@@ -18,13 +18,13 @@ Examples:
   # See how much removing event features hurts (no retraining):
   python ablation.py feature_zero --zero-groups event
 
-  # Freeze GRU, fine-tune only the FC head for 3 epochs:
+    # Freeze GRU layers and fine-tune FC layers.
   python ablation.py freeze_finetune --freeze gru --finetune-epochs 3
 
   # Fine-tune with kernel loss for 2 epochs:
   python ablation.py loss_swap --loss kernel --finetune-epochs 2
 
-  # Evaluate with 50 ensemble draws instead of the default 20:
+    # Evaluate metrics with different ensemble sizes.
   python ablation.py ensemble_size --num-generations 50
 """
 
@@ -40,29 +40,18 @@ from typing import Dict, List, Tuple
 
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 
+import datapreprocessing as dp
+import fullpredict as fp
+from config import cli_or_config, load_config, resolve_path
 from NN import ConditionalGenerativeModel, createGenerativeGRUNN
-from datapreprocessing import NORMALIZATION_EPSILON, WINDOW_SIZE, load_calendar_features
-from train import (
-    BATCH_SIZE,
-    CALENDAR_FEATURE_SET,
-    CALENDAR_PATH,
-    DATA_PATH,
-    FC_HIDDEN_SIZES,
-    MAX_DAY_COLUMNS,
-    MAX_PRODUCTS,
-    METADATA_FILE,
-    MODEL_FILE,
-    TRAIN_SPLIT,
-    VAL_SPLIT,
-    TimeSeriesWindowDataset,
-    compute_loss,
-    create_data_loader,
-)
+from datapreprocessing import NORMALIZATION_EPSILON, load_calendar_features
+from train import TimeSeriesWindowDataset, compute_loss
 from fullpredict import (
     _split_origin_range,
     compute_metrics,
-    load_series_matrix,
+    load_product_series,
     model_predict_mean,
     normalize_calendar_context,
     normalize_context_batch,
@@ -70,6 +59,83 @@ from fullpredict import (
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 METADATA_COLS = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
+WINDOW_SIZE = dp.WINDOW_SIZE
+DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
+CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
+METADATA_FILE = Path(__file__).resolve().parent.parent / 'artifacts' / 'model_metadata.json'
+MODEL_FILE = Path(__file__).resolve().parent.parent / 'artifacts' / 'model_checkpoint.pt'
+CALENDAR_FEATURE_SET = 'rich'
+MAX_DAY_COLUMNS = 365
+MAX_PRODUCTS = 1000
+TRAIN_SPLIT = 0.6
+VAL_SPLIT = 0.2
+TRAIN_BATCH_SIZE = 81920
+NUM_WORKERS = 8
+PREFETCH_FACTOR = 2
+
+
+def _create_data_loader(dataset, batch_size: int, shuffle: bool):
+    """Create a PyTorch DataLoader for the provided dataset.
+
+    Args:
+        dataset: The collection of time series blocks to iterate over.
+        batch_size: Fixed number of elements to process concurrently.
+        shuffle: Whether to iterate samples in randomized order.
+
+    Returns:
+        The initialized DataLoader object.
+    """
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        pin_memory=torch.cuda.is_available(),
+        num_workers=NUM_WORKERS,
+        prefetch_factor=PREFETCH_FACTOR if batch_size > 0 and NUM_WORKERS > 0 else None,
+    )
+
+
+def apply_runtime_config(config_path: str | None):
+    """Update runtime globals from YAML configuration.
+
+    Args:
+        config_path: Path to the configuration file.
+
+    Returns:
+        None. Modifies global limits internally before program execution begins.
+    """
+    global WINDOW_SIZE, DATA_PATH, CALENDAR_PATH, METADATA_FILE, MODEL_FILE
+    global CALENDAR_FEATURE_SET, MAX_DAY_COLUMNS, MAX_PRODUCTS, TRAIN_SPLIT, VAL_SPLIT
+    global TRAIN_BATCH_SIZE, NUM_WORKERS, PREFETCH_FACTOR
+
+    config = load_config(config_path)
+    WINDOW_SIZE = int(cli_or_config(None, config, 'data', 'window_size'))
+    dp.WINDOW_SIZE = WINDOW_SIZE
+    fp.WINDOW_SIZE = WINDOW_SIZE
+
+    DATA_PATH = resolve_path(config, 'data_path', DATA_PATH)
+    CALENDAR_PATH = resolve_path(config, 'calendar_path', CALENDAR_PATH)
+    METADATA_FILE = resolve_path(config, 'metadata_file', METADATA_FILE)
+    MODEL_FILE = resolve_path(config, 'model_file', MODEL_FILE)
+
+    CALENDAR_FEATURE_SET = str(cli_or_config(None, config, 'data', 'calendar_feature_set'))
+    MAX_DAY_COLUMNS = int(cli_or_config(None, config, 'data', 'max_day_columns'))
+    MAX_PRODUCTS = int(cli_or_config(None, config, 'data', 'max_products'))
+    TRAIN_SPLIT = float(cli_or_config(None, config, 'training', 'train_split'))
+    VAL_SPLIT = float(cli_or_config(None, config, 'training', 'val_split'))
+    TRAIN_BATCH_SIZE = int(cli_or_config(None, config, 'training', 'batch_size'))
+    NUM_WORKERS = int(cli_or_config(None, config, 'training', 'num_workers'))
+    PREFETCH_FACTOR = int(cli_or_config(None, config, 'training', 'prefetch_factor'))
+
+    fp.DATA_PATH = DATA_PATH
+    fp.CALENDAR_PATH = CALENDAR_PATH
+    fp.METADATA_FILE = METADATA_FILE
+    fp.MODEL_FILE = MODEL_FILE
+    fp.CALENDAR_FEATURE_SET = CALENDAR_FEATURE_SET
+    fp.MAX_DAY_COLUMNS = MAX_DAY_COLUMNS
+    fp.MAX_PRODUCTS = MAX_PRODUCTS
+    fp.TRAIN_SPLIT = TRAIN_SPLIT
+    fp.VAL_SPLIT = VAL_SPLIT
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +191,7 @@ def _resolve_metadata_path(checkpoint_path: Path, metadata_arg: str | None) -> P
             return artifacts_candidate
         raise FileNotFoundError(f"Metadata file not found: {metadata_arg}")
 
-    # Try to match model_checkpoint_SUFFIX.pt -> model_metadata_SUFFIX.json
+    # Infer metadata file by matching the checkpoint's suffix.
     stem = checkpoint_path.stem
     if stem.startswith("model_checkpoint"):
         suffix = stem[len("model_checkpoint"):]
@@ -320,7 +386,7 @@ def run_feature_zero(args: argparse.Namespace) -> None:
     model.eval()
     data_size = model.net.gru.input_size
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     calendar_names = metadata.get("calendar_feature_names", [])
 
@@ -328,7 +394,7 @@ def run_feature_zero(args: argparse.Namespace) -> None:
         print("Model was trained without calendar features – nothing to ablate.")
         return
 
-    # Baseline (no masking)
+    # Establish the unmasked baseline metric prior to ablation.
     baseline = _rolling_eval(
         model, series, calendar_matrix, device,
         batch_size=args.batch_size, eval_split=args.eval_split,
@@ -440,8 +506,8 @@ def _get_finetune_loaders(args: argparse.Namespace, data_size: int, metadata_pat
     train_ds = TimeSeriesWindowDataset(sales_matrix, WINDOW_SIZE, calendar_features, 0, train_end)
     val_ds = TimeSeriesWindowDataset(sales_matrix, WINDOW_SIZE, calendar_features, train_end, val_end)
 
-    train_loader = create_data_loader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = create_data_loader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = _create_data_loader(train_ds, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
+    val_loader = _create_data_loader(val_ds, batch_size=TRAIN_BATCH_SIZE, shuffle=False)
     return train_loader, val_loader
 
 
@@ -454,7 +520,20 @@ def _finetune(
     device: str,
     lr: float = 5e-4,
 ) -> ConditionalGenerativeModel:
-    """Run a short fine-tuning loop on whichever parameters are unfrozen."""
+    """Fine-tune trainable model parameters for a fixed number of epochs.
+
+    Args:
+        model: Forecast model with some parameters marked as trainable.
+        train_loader: Training data loader.
+        val_loader: Validation data loader.
+        epochs: Number of fine-tuning epochs.
+        loss_name: Loss function name.
+        device: Device identifier (cpu or cuda).
+        lr: Optimizer learning rate. Default is 5e-4.
+
+    Returns:
+        Model with best validation weights restored.
+    """
     trainable = [p for p in model.parameters() if p.requires_grad]
     if not trainable:
         print("Warning: no trainable parameters – skipping fine-tuning.")
@@ -480,7 +559,7 @@ def _finetune(
 
         avg_train = running_loss / max(n_samples, 1)
 
-        # Validation
+        # Measure generalization error across the held-out validation segment.
         model.eval()
         val_loss = 0.0
         val_n = 0
@@ -513,7 +592,7 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
     data_size = checkpoint.get("data_size", 1)
     loss_name = checkpoint.get("loss_name", "ensemble_nll")
 
-    # Decide what to freeze
+    # Freeze selected parameters before fine-tuning.
     if args.freeze == "gru":
         _freeze_params(model.net.gru)
         label = "GRU frozen, FC fine-tuned"
@@ -527,8 +606,8 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
     train_loader, val_loader = _get_finetune_loaders(args, data_size, metadata_path=metadata_path)
     model = _finetune(model, train_loader, val_loader, args.finetune_epochs, loss_name, device, lr=args.lr)
 
-    # Evaluate on backtest
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    # Compare model performance against the historical rolling window sequence.
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     metrics = _rolling_eval(
         model, series, calendar_matrix, device,
@@ -560,7 +639,7 @@ def run_loss_swap(args: argparse.Namespace) -> None:
     train_loader, val_loader = _get_finetune_loaders(args, data_size)
     model = _finetune(model, train_loader, val_loader, args.finetune_epochs, new_loss, device, lr=args.lr)
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     metrics = _rolling_eval(
         model, series, calendar_matrix, device,
@@ -588,7 +667,7 @@ def run_ensemble_size(args: argparse.Namespace) -> None:
     model.eval()
     data_size = model.net.gru.input_size
 
-    product_ids, day_cols, series = load_series_matrix(mode=args.mode)
+    product_ids, day_cols, series = load_product_series(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
 
     sizes = args.num_generations
@@ -620,9 +699,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Shared flags
-    parser.add_argument("--mode", choices=["quick", "full"], default="quick")
-    parser.add_argument("--eval-split", choices=["all", "val", "test"], default="test")
-    parser.add_argument("--batch-size", type=int, default=2048)
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file.")
+    parser.add_argument("--mode", choices=["quick", "full"], default=None)
+    parser.add_argument("--eval-split", choices=["all", "val", "test"], default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--max-origins", type=int, default=None)
     parser.add_argument("--save", action="store_true", help="Persist the modified checkpoint.")
     parser.add_argument(
@@ -655,22 +735,22 @@ def build_parser() -> argparse.ArgumentParser:
              "Omit to test all groups one-by-one.",
     )
 
-    # freeze_finetune
+    # Architecture limitation adjustments.
     ff = sub.add_parser("freeze_finetune", help="Freeze GRU or FC, fine-tune the rest.")
     ff.add_argument("--freeze", choices=["gru", "fc"], required=True)
-    ff.add_argument("--finetune-epochs", type=int, default=3)
-    ff.add_argument("--lr", type=float, default=5e-4)
+    ff.add_argument("--finetune-epochs", type=int, default=None)
+    ff.add_argument("--lr", type=float, default=None)
 
-    # loss_swap
+    # loss_swap configuration.
     ls = sub.add_parser("loss_swap", help="Fine-tune with a different loss function.")
     ls.add_argument("--loss", required=True, choices=["ensemble_nll", "energy", "kernel", "energy_kernel"])
-    ls.add_argument("--finetune-epochs", type=int, default=2)
-    ls.add_argument("--lr", type=float, default=5e-4)
+    ls.add_argument("--finetune-epochs", type=int, default=None)
+    ls.add_argument("--lr", type=float, default=None)
 
-    # ensemble_size
+    # ensemble_size configuration.
     es = sub.add_parser("ensemble_size", help="Evaluate with different ensemble draw counts.")
     es.add_argument(
-        "--num-generations", type=int, nargs="+", default=[5, 10, 20, 50, 100],
+        "--num-generations", type=int, nargs="+", default=None,
         help="List of ensemble sizes to test.",
     )
 
@@ -679,6 +759,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    apply_runtime_config(args.config)
+
+    runtime_config = load_config(args.config)
+    args.mode = str(cli_or_config(args.mode, runtime_config, 'inference', 'mode'))
+    args.eval_split = str(cli_or_config(args.eval_split, runtime_config, 'inference', 'eval_split'))
+    args.batch_size = int(cli_or_config(args.batch_size, runtime_config, 'inference', 'batch_size'))
+    if args.max_origins is None:
+        args.max_origins = cli_or_config(None, runtime_config, 'inference', 'max_origins')
+
+    if hasattr(args, 'finetune_epochs') and args.finetune_epochs is not None:
+        pass
+    elif hasattr(args, 'finetune_epochs'):
+        args.finetune_epochs = int(cli_or_config(None, runtime_config, 'ablation', 'finetune_epochs'))
+
+    if hasattr(args, 'lr') and args.lr is not None:
+        pass
+    elif hasattr(args, 'lr'):
+        args.lr = float(cli_or_config(None, runtime_config, 'ablation', 'lr'))
+
+    if hasattr(args, 'num_generations') and args.num_generations is None:
+        args.num_generations = list(cli_or_config(None, runtime_config, 'ablation', 'num_generations'))
 
     dispatch = {
         "feature_zero":    run_feature_zero,

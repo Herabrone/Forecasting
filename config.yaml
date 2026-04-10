@@ -1,0 +1,55 @@
+paths:
+  data_path: src/sales_train_validation.csv
+  calendar_path: src/calendar.csv
+  artifacts_dir: artifacts
+  model_file: artifacts/model_checkpoint.pt
+  metadata_file: artifacts/model_metadata.json
+  loss_plot_file: artifacts/loss_vs_epoch.png
+
+data:
+  window_size: 28
+  use_calendar_features: true
+  calendar_feature_set: rich
+  quick_run: false
+  max_products: 1000
+  max_day_columns: 365
+
+training:
+  loss_name: energy
+  batch_size: 81920
+  epochs: 40
+  learning_rate: 0.001
+  progress_every: 50
+  train_split: 0.6
+  val_split: 0.2
+  test_split: 0.2
+  num_workers: 8
+  prefetch_factor: 2
+
+model:
+  gru_hidden_size: 64
+  noise_size: 8
+  output_size: 1
+  fc_hidden_sizes: [128, 64, 32]
+  number_generations_per_forward_call: 20
+
+inference:
+  mode: quick
+  horizon: 1
+  batch_size: 2048
+  eval_split: test
+  max_origins: null
+  device: auto
+
+comparison:
+  max_products: 300
+  models: neural,seasonal7,seasonal28,ma7,ma28
+  output_dir: artifacts
+
+ablation:
+  finetune_epochs: 3
+  lr: 0.0005
+  num_generations: [5, 10, 20, 50, 100]
+
+predict:
+  product_id: HOBBIES_1_008_CA_1_validation

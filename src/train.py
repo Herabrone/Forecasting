@@ -1,3 +1,15 @@
+"""Train a probabilistic neural forecaster on M5 daily sales data.
+
+This module handles:
+- loading sales and optional calendar covariates,
+- creating chronological train/validation/test window splits,
+- fitting a GRU-based conditional generative model,
+- saving model artifacts and training metadata.
+
+Configuration is loaded from config.yaml and can be overridden per run with CLI flags.
+"""
+
+import argparse
 import sys
 import os
 import json
@@ -10,32 +22,35 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
+import datapreprocessing as dp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datapreprocessing import WINDOW_SIZE, load_calendar_features
+from datapreprocessing import load_calendar_features
+from config import cli_or_config, load_config, resolve_path
 from src.NN import createGenerativeGRUNN, ConditionalGenerativeModel, ensemble_nll_loss
 from src.scoringrules import energy, kernel, energy_kernel
 
 
+WINDOW_SIZE = dp.WINDOW_SIZE
+
 DATA_PATH = Path(__file__).resolve().parent / 'sales_train_validation.csv'
 CALENDAR_PATH = Path(__file__).resolve().parent / 'calendar.csv'
-USE_CALENDAR_FEATURES = False  # Toggle calendar covariates on/off.
-CALENDAR_FEATURE_SET = 'rich'  # Supported values: 'minimal' or 'rich'.
-LOSS_NAME = 'ensemble_nll'  # Training objective to optimize. 'ensemble_nll' is usually the fastest and most stable.
-                             # Other options ('energy', 'kernel', 'energy_kernel') are valid but can train slower.
+USE_CALENDAR_FEATURES = True  # Controls inclusion of external calendar covariates.
+CALENDAR_FEATURE_SET = 'rich'  # Determines covariate dimensionality ('minimal' or 'rich').
+LOSS_NAME = 'energy'  # Model optimization objective ('ensemble_nll', 'energy', 'kernel', 'energy_kernel').
+                             # Advanced objectives like 'energy' penalize spread but increase runtime.
 
-QUICK_RUN = True  # If True, train on a subset for faster iteration. If False, use all products and all day columns.
+QUICK_RUN = False  # Truncates dataset dimensions to accelerate debug iterations.
 
-MAX_PRODUCTS = 1000  # Number of product time series to keep when QUICK_RUN=True.
-MAX_DAY_COLUMNS = 365  # Number of most recent day columns to keep when QUICK_RUN=True.
-                       # Must be >= WINDOW_SIZE + 1 to form at least one input-target pair.
+MAX_PRODUCTS = 1000  # Caps product time series in quick runs to limit memory.
+MAX_DAY_COLUMNS = 365  # Truncates history window in quick runs.
+                       # Requires at least WINDOW_SIZE + 1 days for minimum sample framing.
 
-BATCH_SIZE = 8192  # Samples per optimizer step.
-                   # Larger batches usually increase throughput on GPU but require more VRAM.
+BATCH_SIZE = 81920  # Tradeoff between VRAM footprint and GPU throughput.
                    # If you hit CUDA OOM, lower this first (for example: 4096, then 2048).
 
-EPOCHS = 10  # Full passes over the selected training subset.
+EPOCHS = 40  # Full passes over the selected training subset.
             # More epochs can improve fit but increase runtime linearly.
 
 # Temporal split ratios for train/val/test. The code will compute actual window boundaries based on the total number of windows.
@@ -45,6 +60,13 @@ TEST_SPLIT = 0.2
 
 # Explicit FC sizes prevent the default architecture from shrinking to a tiny last hidden layer.
 FC_HIDDEN_SIZES = [128, 64, 32]
+GRU_HIDDEN_SIZE = 64
+NOISE_SIZE = 8
+OUTPUT_SIZE = 1
+NUMBER_GENERATIONS_PER_FORWARD_CALL = 20
+LEARNING_RATE = 1e-3
+NUM_WORKERS = 8
+PREFETCH_FACTOR = 2
 
 PROGRESS_EVERY = 50  # Print progress/ETA every N batches to show how close training is to completion.
 
@@ -54,7 +76,114 @@ METADATA_FILE = ARTIFACTS_DIR / 'model_metadata.json'
 LOSS_PLOT_FILE = ARTIFACTS_DIR / 'loss_vs_epoch.png'
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Train the probabilistic forecasting model.')
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
+    parser.add_argument('--mode', choices=['quick', 'full'], default=None, help='Data scope override: quick subset or full dataset.')
+    parser.add_argument(
+        '--loss-name',
+        choices=['ensemble_nll', 'energy', 'kernel', 'energy_kernel'],
+        default=None,
+        help='Training objective override.',
+    )
+    parser.add_argument('--epochs', type=int, default=None, help='Number of training epochs.')
+    parser.add_argument('--batch-size', type=int, default=None, help='Batch size for train/val/test data loaders.')
+    parser.add_argument('--learning-rate', type=float, default=None, help='Optimizer learning rate.')
+    parser.add_argument('--progress-every', type=int, default=None, help='Progress print interval in train batches.')
+    parser.add_argument('--max-products', type=int, default=None, help='Limit products when using quick mode.')
+    parser.add_argument('--max-day-columns', type=int, default=None, help='Limit number of most recent day columns in quick mode.')
+    parser.add_argument('--window-size', type=int, default=None, help='Context window length in days.')
+    parser.add_argument('--calendar-feature-set', choices=['minimal', 'rich'], default=None, help='Calendar feature preset.')
+    parser.add_argument('--train-split', type=float, default=None, help='Train split ratio.')
+    parser.add_argument('--val-split', type=float, default=None, help='Validation split ratio.')
+    parser.add_argument('--test-split', type=float, default=None, help='Test split ratio.')
+    parser.add_argument('--num-workers', type=int, default=None, help='DataLoader worker count.')
+    parser.add_argument('--prefetch-factor', type=int, default=None, help='DataLoader prefetch factor when workers > 0.')
+    parser.add_argument('--gru-hidden-size', type=int, default=None, help='GRU hidden size.')
+    parser.add_argument('--noise-size', type=int, default=None, help='Auxiliary noise dimension for generation.')
+    parser.add_argument('--output-size', type=int, default=None, help='Output dimension per forecast target.')
+    parser.add_argument('--num-generations', type=int, default=None, help='Number of generated samples per forward call.')
+    parser.add_argument('--fc-hidden-sizes', type=str, default=None, help='Comma-separated FC hidden sizes, e.g. 128,64,32.')
+
+    calendar_group = parser.add_mutually_exclusive_group()
+    calendar_group.add_argument('--use-calendar-features', dest='use_calendar_features', action='store_true')
+    calendar_group.add_argument('--no-calendar-features', dest='use_calendar_features', action='store_false')
+    parser.set_defaults(use_calendar_features=None)
+
+    return parser.parse_args()
+
+
+def _parse_fc_hidden_sizes(raw_value):
+    """Convert config/CLI FC layer spec into a list of integers."""
+
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, list):
+        return [int(size) for size in raw_value]
+    return [int(size.strip()) for size in str(raw_value).split(',') if size.strip()]
+
+
+def apply_runtime_config(args: argparse.Namespace) -> None:
+    """Resolve runtime settings by merging CLI overrides with config defaults."""
+
+    global WINDOW_SIZE
+    global DATA_PATH, CALENDAR_PATH, ARTIFACTS_DIR, MODEL_FILE, METADATA_FILE, LOSS_PLOT_FILE
+    global USE_CALENDAR_FEATURES, CALENDAR_FEATURE_SET, LOSS_NAME
+    global QUICK_RUN, MAX_PRODUCTS, MAX_DAY_COLUMNS
+    global BATCH_SIZE, EPOCHS, LEARNING_RATE, PROGRESS_EVERY
+    global TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT
+    global FC_HIDDEN_SIZES, GRU_HIDDEN_SIZE, NOISE_SIZE, OUTPUT_SIZE, NUMBER_GENERATIONS_PER_FORWARD_CALL
+    global NUM_WORKERS, PREFETCH_FACTOR
+
+    config = load_config(args.config)
+
+    DATA_PATH = resolve_path(config, 'data_path', DATA_PATH)
+    CALENDAR_PATH = resolve_path(config, 'calendar_path', CALENDAR_PATH)
+    ARTIFACTS_DIR = resolve_path(config, 'artifacts_dir', ARTIFACTS_DIR)
+    MODEL_FILE = resolve_path(config, 'model_file', MODEL_FILE)
+    METADATA_FILE = resolve_path(config, 'metadata_file', METADATA_FILE)
+    LOSS_PLOT_FILE = resolve_path(config, 'loss_plot_file', LOSS_PLOT_FILE)
+
+    mode = args.mode
+    if mode is None:
+        quick_from_config = cli_or_config(None, config, 'data', 'quick_run')
+        QUICK_RUN = bool(quick_from_config)
+    else:
+        QUICK_RUN = mode == 'quick'
+
+    WINDOW_SIZE = int(cli_or_config(args.window_size, config, 'data', 'window_size'))
+    dp.WINDOW_SIZE = WINDOW_SIZE
+
+    USE_CALENDAR_FEATURES = bool(cli_or_config(args.use_calendar_features, config, 'data', 'use_calendar_features'))
+    CALENDAR_FEATURE_SET = str(cli_or_config(args.calendar_feature_set, config, 'data', 'calendar_feature_set'))
+    MAX_PRODUCTS = int(cli_or_config(args.max_products, config, 'data', 'max_products'))
+    MAX_DAY_COLUMNS = int(cli_or_config(args.max_day_columns, config, 'data', 'max_day_columns'))
+
+    LOSS_NAME = str(cli_or_config(args.loss_name, config, 'training', 'loss_name'))
+    BATCH_SIZE = int(cli_or_config(args.batch_size, config, 'training', 'batch_size'))
+    EPOCHS = int(cli_or_config(args.epochs, config, 'training', 'epochs'))
+    LEARNING_RATE = float(cli_or_config(args.learning_rate, config, 'training', 'learning_rate'))
+    PROGRESS_EVERY = int(cli_or_config(args.progress_every, config, 'training', 'progress_every'))
+    TRAIN_SPLIT = float(cli_or_config(args.train_split, config, 'training', 'train_split'))
+    VAL_SPLIT = float(cli_or_config(args.val_split, config, 'training', 'val_split'))
+    TEST_SPLIT = float(cli_or_config(args.test_split, config, 'training', 'test_split'))
+    NUM_WORKERS = int(cli_or_config(args.num_workers, config, 'training', 'num_workers'))
+    PREFETCH_FACTOR = int(cli_or_config(args.prefetch_factor, config, 'training', 'prefetch_factor'))
+
+    FC_HIDDEN_SIZES = _parse_fc_hidden_sizes(
+        cli_or_config(args.fc_hidden_sizes, config, 'model', 'fc_hidden_sizes')
+    )
+    GRU_HIDDEN_SIZE = int(cli_or_config(args.gru_hidden_size, config, 'model', 'gru_hidden_size'))
+    NOISE_SIZE = int(cli_or_config(args.noise_size, config, 'model', 'noise_size'))
+    OUTPUT_SIZE = int(cli_or_config(args.output_size, config, 'model', 'output_size'))
+    NUMBER_GENERATIONS_PER_FORWARD_CALL = int(
+        cli_or_config(args.num_generations, config, 'model', 'number_generations_per_forward_call')
+    )
+
+
 def _day_sort_key(day_col_name):
+    """Sort M5 day columns numerically (d_1, d_2, ..., d_n)."""
+
     return int(day_col_name.split('_', maxsplit=1)[1])
 
 
@@ -110,7 +239,7 @@ class TimeSeriesWindowDataset(Dataset):
 
         sales_mean = float(sales_window.mean())
         sales_std = float(sales_window.std())
-        safe_std = sales_std if sales_std > 1e-8 else 1.0
+        safe_std = sales_std if sales_std > dp.NORMALIZATION_EPSILON else 1.0
 
         normalized_sales = ((sales_window - sales_mean) / safe_std).astype(np.float32)
         normalized_target = np.array([(target_value - sales_mean) / safe_std], dtype=np.float32)
@@ -121,7 +250,7 @@ class TimeSeriesWindowDataset(Dataset):
             calendar_window = self.calendar_features[window_start:window_end, :]
             cal_mean = calendar_window.mean(axis=0, keepdims=True)
             cal_std = calendar_window.std(axis=0, keepdims=True)
-            safe_cal_std = np.where(cal_std > 1e-8, cal_std, 1.0)
+            safe_cal_std = np.where(cal_std > dp.NORMALIZATION_EPSILON, cal_std, 1.0)
             normalized_calendar = ((calendar_window - cal_mean) / safe_cal_std).astype(np.float32)
             sample_features = np.concatenate([sample_features, normalized_calendar], axis=1)
 
@@ -261,8 +390,8 @@ def create_data_loader(dataset, batch_size=64, shuffle=False):
         batch_size=batch_size,
         shuffle=shuffle,
         pin_memory=torch.cuda.is_available(),
-        num_workers=8,
-        prefetch_factor=2 if batch_size > 0 else None
+        num_workers=NUM_WORKERS,
+        prefetch_factor=PREFETCH_FACTOR if batch_size > 0 and NUM_WORKERS > 0 else None,
     )
 
 
@@ -275,11 +404,11 @@ def save_artifacts(model, device, loss_name, final_loss, best_val_loss, test_los
         'model_state_dict': model.state_dict(),
         'loss_name': loss_name,
         'data_size': data_size,
-        'noise_size': 8,
-        'gru_hidden_size': 64,
-        'output_size': 1,
+        'noise_size': NOISE_SIZE,
+        'gru_hidden_size': GRU_HIDDEN_SIZE,
+        'output_size': OUTPUT_SIZE,
         'fc_hidden_sizes': FC_HIDDEN_SIZES,
-        'number_generations_per_forward_call': 20,
+        'number_generations_per_forward_call': NUMBER_GENERATIONS_PER_FORWARD_CALL,
     }
     torch.save(checkpoint, MODEL_FILE)
 
@@ -353,8 +482,24 @@ def evaluate_model(model, data_loader, device, loss_name):
     return total_loss / total_count
 
 
-def train_model(train_loader, val_loader, test_loader, data_size, calendar_feature_names, split_info, loss_name=LOSS_NAME):
-    """Create NN model and minimal training setup."""
+def train_model(train_loader, val_loader, test_loader, data_size, calendar_feature_names, split_info, loss_name=None):
+    """Create and train the model.
+
+    Args:
+        train_loader: DataLoader providing the training batches.
+        val_loader: DataLoader providing the validation batches.
+        test_loader: DataLoader providing the test batches.
+        data_size: Total number of features per timestep.
+        calendar_feature_names: List of names for included calendar covariates.
+        split_info: Dictionary containing temporal window boundaries.
+        loss_name: Optimization objective identifier.
+
+    Returns:
+        The trained ConditionalGenerativeModel.
+    """
+    if loss_name is None:
+        loss_name = LOSS_NAME
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
@@ -362,22 +507,22 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
     else:
         print("Using CPU")
 
-    noise_size = 8 # Size of the noise vector for the generative model, can be chaned to see how it affects the results
-    learning_rate = 1e-3
+    noise_size = NOISE_SIZE
+    learning_rate = LEARNING_RATE
     epochs = EPOCHS
     
     net = createGenerativeGRUNN(
         data_size=data_size,
-        gru_hidden_size=64,
+        gru_hidden_size=GRU_HIDDEN_SIZE,
         noise_size=noise_size,
-        output_size=1,
+        output_size=OUTPUT_SIZE,
         hidden_sizes=FC_HIDDEN_SIZES,
     )()
     
     model = ConditionalGenerativeModel(
         net=net,
         size_auxiliary_variable=noise_size,
-        number_generations_per_forward_call=20
+        number_generations_per_forward_call=NUMBER_GENERATIONS_PER_FORWARD_CALL
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -422,7 +567,7 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
             epoch_loss += loss.item() * context_batch.size(0)
 
-            #Adding this so I can see how roughly the training will take lol
+            # Report progress and ETA during training runs.
             overall_batch_index = epoch * batches_per_epoch + batch_index
             if batch_index % PROGRESS_EVERY == 0 or batch_index == batches_per_epoch:
                 elapsed_seconds = time.time() - training_start_time
@@ -478,9 +623,19 @@ def train_model(train_loader, val_loader, test_loader, data_size, calendar_featu
 
 
 if __name__ == '__main__':
+    args = parse_args()
+    apply_runtime_config(args)
+
+    split_total = TRAIN_SPLIT + VAL_SPLIT + TEST_SPLIT
+    if not np.isclose(split_total, 1.0, atol=1e-6):
+        raise ValueError(
+            f'Split ratios must sum to 1.0. Got train+val+test={split_total:.6f}'
+        )
+
     print(f'Calendar features enabled: {USE_CALENDAR_FEATURES}')
     print(f'Calendar path: {CALENDAR_PATH}')
     print(f'Calendar feature set: {CALENDAR_FEATURE_SET}')
+    print(f'Config: quick_run={QUICK_RUN}, batch_size={BATCH_SIZE}, epochs={EPOCHS}, loss={LOSS_NAME}')
 
     train_dataset, val_dataset, test_dataset, data_size, calendar_feature_names, split_info = load_and_preprocess()
     train_loader = create_data_loader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
@@ -497,7 +652,11 @@ if __name__ == '__main__':
         f"(total: {split_info['total_windows']})"
     )
     if QUICK_RUN:
-        print(f"Quick run enabled - products: {MAX_PRODUCTS}, day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, batch_size: {BATCH_SIZE}, epochs: {EPOCHS}")
+        print(
+            f"Quick run enabled - products: {MAX_PRODUCTS}, "
+            f"day_columns: {max(WINDOW_SIZE + 1, MAX_DAY_COLUMNS)}, "
+            f"batch_size: {BATCH_SIZE}, epochs: {EPOCHS}"
+        )
     train_model(
         train_loader,
         val_loader,
