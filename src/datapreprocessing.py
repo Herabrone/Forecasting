@@ -118,7 +118,16 @@ def build_calendar_features(calendar_df, day_cols, feature_set='rich'):
 
 
 def load_calendar_features(calendar_path, day_cols, feature_set='rich'):
-    """Load calendar CSV from disk and return aligned feature matrix."""
+    """Load calendar CSV from disk and return aligned feature matrix.
+    
+    Args:
+        calendar_path: The file path to the calendar CSV containing date covariates.
+        day_cols: A list of day labels specifying which days to extract data for.
+        feature_set: The chosen set of features to generate ('minimal' or 'rich').
+        
+    Returns:
+        A tuple containing the numeric feature matrix and a list of feature names.
+    """
 
     calendar_df = pd.read_csv(calendar_path)
     feature_matrix, feature_names = build_calendar_features(calendar_df, day_cols, feature_set=feature_set)
@@ -160,8 +169,7 @@ def normalize_calendar_windows(calendar_windows):
 def process(days, calendar_features=None):
     """Build model-ready windows from sales history."""
 
-    # Convert sales counts to float32 before window construction.
-    days_continuous = days.astype(np.float32).to_numpy()  # [num_products, num_days]
+    days_continuous = days.astype(np.float32).to_numpy()
 
     if calendar_features is not None:
         calendar_features = np.asarray(calendar_features, dtype=np.float32)
@@ -177,7 +185,7 @@ def process(days, calendar_features=None):
     windows, targets = sliding_window(days_continuous)    # windows: [num_windows, num_products, WINDOW_SIZE]
     windows, targets = normalize_windows_and_targets(windows, targets)
 
-    # Reshape to per-sample layout: each (product, window) pair becomes one sample
+    # Flatten dimensions to map each (product, window) pair to an independent training sample
     sales_X = np.transpose(windows, (1, 0, 2)).reshape(-1, WINDOW_SIZE, 1).astype(np.float32)
 
     if calendar_features is not None:
