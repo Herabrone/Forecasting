@@ -18,13 +18,13 @@ Examples:
   # See how much removing event features hurts (no retraining):
   python ablation.py feature_zero --zero-groups event
 
-  # Freeze GRU, fine-tune only the FC head for 3 epochs:
+  # Restrict GRU layers while adapting forward fully-connected networks mapping.
   python ablation.py freeze_finetune --freeze gru --finetune-epochs 3
 
   # Fine-tune with kernel loss for 2 epochs:
   python ablation.py loss_swap --loss kernel --finetune-epochs 2
 
-  # Evaluate with 50 ensemble draws instead of the default 20:
+  # Project metrics under expanded ensemble simulation variations.
   python ablation.py ensemble_size --num-generations 50
 """
 
@@ -75,6 +75,16 @@ PREFETCH_FACTOR = 2
 
 
 def _create_data_loader(dataset, batch_size: int, shuffle: bool):
+    """Instantiates a highly parallelized native PyTorch data loader for the dataset.
+
+    Args:
+        dataset: The collection of time series blocks to iterate over.
+        batch_size: Fixed number of elements to process concurrently.
+        shuffle: Toggles randomized sampling of elements.
+
+    Returns:
+        The initialized DataLoader object.
+    """
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -86,6 +96,14 @@ def _create_data_loader(dataset, batch_size: int, shuffle: bool):
 
 
 def apply_runtime_config(config_path: str | None):
+    """Reconciles internal parameter globals using cli flags or YAML configurations.
+
+    Args:
+        config_path: Pathline path directing to project configurations.
+
+    Returns:
+        None. Modifies global limits internally before program execution begins.
+    """
     global WINDOW_SIZE, DATA_PATH, CALENDAR_PATH, METADATA_FILE, MODEL_FILE
     global CALENDAR_FEATURE_SET, MAX_DAY_COLUMNS, MAX_PRODUCTS, TRAIN_SPLIT, VAL_SPLIT
     global TRAIN_BATCH_SIZE, NUM_WORKERS, PREFETCH_FACTOR
@@ -173,7 +191,7 @@ def _resolve_metadata_path(checkpoint_path: Path, metadata_arg: str | None) -> P
             return artifacts_candidate
         raise FileNotFoundError(f"Metadata file not found: {metadata_arg}")
 
-    # Try to match model_checkpoint_SUFFIX.pt -> model_metadata_SUFFIX.json
+    # Infer metadata file by matching the checkpoint's suffix.
     stem = checkpoint_path.stem
     if stem.startswith("model_checkpoint"):
         suffix = stem[len("model_checkpoint"):]
@@ -376,7 +394,7 @@ def run_feature_zero(args: argparse.Namespace) -> None:
         print("Model was trained without calendar features – nothing to ablate.")
         return
 
-    # Baseline (no masking)
+    # Establish the unmasked baseline metric prior to ablation.
     baseline = _rolling_eval(
         model, series, calendar_matrix, device,
         batch_size=args.batch_size, eval_split=args.eval_split,
@@ -502,7 +520,20 @@ def _finetune(
     device: str,
     lr: float = 5e-4,
 ) -> ConditionalGenerativeModel:
-    """Run a short fine-tuning loop on whichever parameters are unfrozen."""
+    """Updates active parameters through back-propagation and partial training length.
+
+    Args:
+        model: Torch sequence estimation structure containing active gradients.
+        train_loader: Sequence elements generator across subset.
+        val_loader: Holdout chunk element loader.
+        epochs: Repetition times around whole partial dataset.
+        loss_name: Cost definition string.
+        device: Current computing medium label.
+        lr: Scaled descent rate parameter. Default is 5e-4.
+
+    Returns:
+        Conditioned network object loaded against minimized error point.
+    """
     trainable = [p for p in model.parameters() if p.requires_grad]
     if not trainable:
         print("Warning: no trainable parameters – skipping fine-tuning.")
@@ -528,7 +559,7 @@ def _finetune(
 
         avg_train = running_loss / max(n_samples, 1)
 
-        # Validation
+        # Measure generalization error across the held-out validation segment.
         model.eval()
         val_loss = 0.0
         val_n = 0
@@ -561,7 +592,7 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
     data_size = checkpoint.get("data_size", 1)
     loss_name = checkpoint.get("loss_name", "ensemble_nll")
 
-    # Decide what to freeze
+    # Apply targeted parameter immobilization based on runtime configuration.
     if args.freeze == "gru":
         _freeze_params(model.net.gru)
         label = "GRU frozen, FC fine-tuned"
@@ -575,7 +606,7 @@ def run_freeze_finetune(args: argparse.Namespace) -> None:
     train_loader, val_loader = _get_finetune_loaders(args, data_size, metadata_path=metadata_path)
     model = _finetune(model, train_loader, val_loader, args.finetune_epochs, loss_name, device, lr=args.lr)
 
-    # Evaluate on backtest
+    # Compare model performance against the historical rolling window sequence.
     product_ids, day_cols, series = load_series_matrix(mode=args.mode)
     calendar_matrix = _load_calendar_matrix_for_checkpoint(day_cols=day_cols, data_size=data_size, metadata_path=metadata_path)
     metrics = _rolling_eval(
@@ -704,19 +735,19 @@ def build_parser() -> argparse.ArgumentParser:
              "Omit to test all groups one-by-one.",
     )
 
-    # freeze_finetune
+    # Architecture limitation adjustments.
     ff = sub.add_parser("freeze_finetune", help="Freeze GRU or FC, fine-tune the rest.")
     ff.add_argument("--freeze", choices=["gru", "fc"], required=True)
     ff.add_argument("--finetune-epochs", type=int, default=None)
     ff.add_argument("--lr", type=float, default=None)
 
-    # loss_swap
+    # Alternate distribution criteria evaluation.
     ls = sub.add_parser("loss_swap", help="Fine-tune with a different loss function.")
     ls.add_argument("--loss", required=True, choices=["ensemble_nll", "energy", "kernel", "energy_kernel"])
     ls.add_argument("--finetune-epochs", type=int, default=None)
     ls.add_argument("--lr", type=float, default=None)
 
-    # ensemble_size
+    # Generative count manipulation test setup.
     es = sub.add_parser("ensemble_size", help="Evaluate with different ensemble draw counts.")
     es.add_argument(
         "--num-generations", type=int, nargs="+", default=None,
