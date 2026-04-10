@@ -43,7 +43,7 @@ inference:
 
 comparison:
   max_products: 300
-  models: neural,seasonal7,seasonal28,ma7,ma28,ets,autoarima
+  models: neural,seasonal7,seasonal28,ma7,ma28
   output_dir: artifacts
 
 ablation:

@@ -83,7 +83,7 @@ This runs the default configuration from `config.yaml`:
 **Data Scope:**
 - `--mode {quick, full}` — **quick**: 100 products, 365 days (fast); **full**: all data (default: full)
 - `--max-products N` — Cap products (default: 1,000)
-- `--max-day-columns N` — Cap recent days (default: 1,800; must be ≥ window_size + 1)
+- `--max-day-columns N` — Cap recent days (default: 365; must be ≥ window_size + 1)
 - `--config PATH` — Override config file location (default: config.yaml)
 
 ### Example Commands
