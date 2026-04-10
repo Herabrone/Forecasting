@@ -25,7 +25,7 @@ Used for: optional calendar covariate features during training and evaluation (s
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install torch pandas numpy pyyaml
+pip install -r requirements.txt
 ```
 
 Then verify setup:
@@ -39,8 +39,10 @@ python train.py --help
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install torch pandas numpy pyyaml
+pip install -r requirements.txt
 ```
+
+Dependency workflow: when package imports change, update `requirements.txt` first, then reinstall with `pip install -r requirements.txt`.
 
 Then verify setup:
 ```bash
